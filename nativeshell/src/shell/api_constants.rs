@@ -10,8 +10,14 @@ pub(crate) mod channel {
         pub const DRAG_SOURCE: &str = ".window.drag-source";
     }
 
-    // Flutter channel for mananing platform menus
+    // Flutter channel for managing platform menus
     pub const MENU_MANAGER: &str = "nativeshell/menu-manager";
+
+    // Flutter channel for keyboard layout notifications
+    pub const KEYBOARD_MAP_MANAGER: &str = "nativeshell/keyboard-map-manager";
+
+    // Flutter channel for managing hot keys
+    pub const HOT_KEY_MANAGER: &str = "nativeshell/hot-key-manager";
 }
 
 pub const CURRENT_API_VERSION: i32 = 1;
@@ -42,6 +48,9 @@ pub(crate) mod method {
         // Hide the window
         pub const HIDE: &str = "Window.hide";
 
+        // Bring window front and request focus
+        pub const ACTIVATE: &str = "Window.activate";
+
         // Close the window; This will terminate the isolate
         pub const CLOSE: &str = "Window.close";
 
@@ -66,12 +75,15 @@ pub(crate) mod method {
         // MacOS only - associates given menu with current windon; The menu will
         // be displayed  when window gets active
         pub const SET_WINDOW_MENU: &str = "Window.setWindowMenu";
+
+        pub const SAVE_POSITION_TO_STRING: &str = "Window.savePositionToString";
+        pub const RESTORE_POSITION_FROM_STRING: &str = "Window.restorePositionFromString";
     }
 
-    pub mod drop_target {
-        pub const DRAGGING_UPDATED: &str = "DropTarget.draggingUpdated";
-        pub const DRAGGING_EXITED: &str = "DropTarget.draggingExited";
-        pub const PERFORM_DROP: &str = "DropTarget.performDrop";
+    pub mod drag_driver {
+        pub const DRAGGING_UPDATED: &str = "DragDriver.draggingUpdated";
+        pub const DRAGGING_EXITED: &str = "DragDriver.draggingExited";
+        pub const PERFORM_DROP: &str = "DragDriver.performDrop";
     }
 
     pub mod drag_source {
@@ -83,6 +95,7 @@ pub(crate) mod method {
         pub const CREATE_OR_UPDATE: &str = "Menu.createOrUpdate";
         pub const DESTROY: &str = "Menu.destroy";
         pub const ON_ACTION: &str = "Menu.onAction";
+        pub const ON_OPEN: &str = "Menu.onOpen";
         pub const SET_APP_MENU: &str = "Menu.setAppMenu";
     }
 
@@ -90,6 +103,17 @@ pub(crate) mod method {
         // Menubar - move to previous menu
         pub const MOVE_TO_PREVIOUS_MENU: &str = "Menubar.moveToPreviousMenu";
         pub const MOVE_TO_NEXT_MENU: &str = "Menubar.moveToNextMenu";
+    }
+
+    pub mod keyboard_map {
+        pub const GET: &str = "KeyboardMap.get";
+        pub const ON_CHANGED: &str = "KeyboardMap.onChanged";
+    }
+
+    pub mod hot_key {
+        pub const CREATE: &str = "HotKey.create";
+        pub const DESTROY: &str = "HotKey.destroy";
+        pub const ON_PRESSED: &str = "HotKey.onPressed";
     }
 }
 

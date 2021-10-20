@@ -9,8 +9,8 @@ use cairo::{Format, ImageSurface};
 use gdk::{Atom, DragAction, EventType};
 use glib::IsA;
 use gtk::{
-    prelude::{DragContextExtManual, WidgetExtManual},
-    DestDefaults, SelectionData, TargetEntry, TargetFlags, TargetList, Widget, WidgetExt,
+    prelude::{DragContextExtManual, WidgetExt, WidgetExtManual},
+    DestDefaults, SelectionData, TargetEntry, TargetFlags, TargetList, Widget,
 };
 
 use crate::{
@@ -18,7 +18,7 @@ use crate::{
     shell::{
         api_model::{DragData, DragEffect, DragRequest, DraggingInfo, ImageData},
         platform::drag_data::{FallThroughDragDataAdapter, UriListDataAdapter},
-        Context, PlatformWindowDelegate, Point,
+        Context, ContextRef, PlatformWindowDelegate, Point,
     },
 };
 
@@ -28,7 +28,7 @@ use super::{
 };
 
 pub struct DropContext {
-    context: Rc<Context>,
+    context: Context,
     window: Weak<PlatformWindow>,
     data_adapters: Vec<Box<dyn DragDataAdapter>>,
 
@@ -41,9 +41,9 @@ pub struct DropContext {
 }
 
 impl DropContext {
-    pub fn new(context: Rc<Context>, window: Weak<PlatformWindow>) -> Self {
+    pub fn new(context: &ContextRef, window: Weak<PlatformWindow>) -> Self {
         Self {
-            context: context.clone(),
+            context: context.weak(),
             window,
             data_adapters: vec![
                 Box::new(UriListDataAdapter::new()),
@@ -58,8 +58,8 @@ impl DropContext {
         }
     }
 
-    fn data_adapters(&self) -> Vec<&dyn DragDataAdapter> {
-        self.context
+    fn data_adapters<'a>(&'a self, context: &'a ContextRef) -> Vec<&'a dyn DragDataAdapter> {
+        context
             .options
             .custom_drag_data_adapters
             .iter()
@@ -74,7 +74,7 @@ impl DropContext {
         context: &gdk::DragContext,
         x: i32,
         y: i32,
-        _time: u32,
+        time: u32,
     ) {
         *self.drag_location.borrow_mut() = Point::xy(x as f64, y as f64);
         self.drag_context.borrow_mut().replace(context.clone());
@@ -84,10 +84,10 @@ impl DropContext {
             return;
         }
 
-        self.get_data(widget, context);
+        self.get_data(widget, context, time);
     }
 
-    fn get_data<T: IsA<Widget>>(&self, widget: &T, context: &gdk::DragContext) {
+    fn get_data<T: IsA<Widget>>(&self, widget: &T, context: &gdk::DragContext, time: u32) {
         let pending_data = {
             let mut pending_data = self.pending_data.borrow_mut();
 
@@ -95,16 +95,17 @@ impl DropContext {
                 return;
             }
 
-            let mut adapters = self.data_adapters();
+            if let Some(ctx) = self.context.get() {
+                let mut adapters = self.data_adapters(&ctx);
 
-            // widget.drag_get_data(context, target, time_)
-            for target in context.list_targets() {
-                let adapter_index = adapters
-                    .iter()
-                    .position(|p| p.data_formats().contains(&target));
-                if let Some(adapter_index) = adapter_index {
-                    pending_data.push(target);
-                    adapters.remove(adapter_index);
+                for target in context.list_targets() {
+                    let adapter_index = adapters
+                        .iter()
+                        .position(|p| p.data_formats().contains(&target));
+                    if let Some(adapter_index) = adapter_index {
+                        pending_data.push(target);
+                        adapters.remove(adapter_index);
+                    }
                 }
             }
 
@@ -112,7 +113,7 @@ impl DropContext {
         };
 
         for data in pending_data.iter() {
-            widget.drag_get_data(&context, &data, 0);
+            widget.drag_get_data(context, data, time);
         }
     }
 
@@ -136,13 +137,13 @@ impl DropContext {
         context: &gdk::DragContext,
         x: i32,
         y: i32,
-        _time: u32,
+        time: u32,
     ) {
         *self.drag_location.borrow_mut() = Point::xy(x as f64, y as f64);
         self.dropping.replace(true);
 
         if self.pending_data.borrow().is_empty() {
-            self.get_data(widget, context);
+            self.get_data(widget, context, time);
         }
     }
 
@@ -163,13 +164,15 @@ impl DropContext {
                 return;
             }
 
-            let adapters = self.data_adapters();
-            let data_type = data.get_data_type();
-            if let Some(pos) = pending_data.iter().position(|d| d == &data_type) {
-                pending_data.remove(pos);
-                for adapter in adapters {
-                    if adapter.data_formats().contains(&data_type) {
-                        adapter.retrieve_drag_data(data, &mut self.current_data.borrow_mut());
+            if let Some(ctx) = self.context.get() {
+                let adapters = self.data_adapters(&ctx);
+                let data_type = data.data_type();
+                if let Some(pos) = pending_data.iter().position(|d| d == &data_type) {
+                    pending_data.remove(pos);
+                    for adapter in adapters {
+                        if adapter.data_formats().contains(&data_type) {
+                            adapter.retrieve_drag_data(data, &mut self.current_data.borrow_mut());
+                        }
                     }
                 }
             }
@@ -182,7 +185,7 @@ impl DropContext {
                 data: DragData {
                     properties: take(&mut self.current_data.borrow_mut()),
                 },
-                allowed_effects: Self::convert_drag_actions_from_gtk(context.get_actions()),
+                allowed_effects: Self::convert_drag_actions_from_gtk(context.actions()),
             };
             if !self.dropping.get() {
                 self.with_delegate(|d| d.dragging_updated(&info));
@@ -235,13 +238,14 @@ impl DropContext {
     }
 
     pub fn register<T: IsA<Widget>>(&self, widget: &T) {
-        let adapters = self.data_adapters();
-
         let mut atoms = Vec::<Atom>::new();
-        for adapter in adapters {
-            adapter.data_formats().iter().for_each(|a| atoms.push(*a));
-        }
+        if let Some(ctx) = self.context.get() {
+            let adapters = self.data_adapters(&ctx);
 
+            for adapter in adapters {
+                adapter.data_formats().iter().for_each(|a| atoms.push(*a));
+            }
+        }
         let entries: Vec<TargetEntry> = atoms
             .iter()
             .map(|a| TargetEntry::new(&a.name(), TargetFlags::empty(), 0))
@@ -262,7 +266,7 @@ impl DropContext {
 //
 
 pub struct DragContext {
-    context: Rc<Context>,
+    context: Context,
     window: Weak<PlatformWindow>,
     data_adapters: Vec<Box<dyn DragDataAdapter>>,
     data: RefCell<Vec<Box<dyn DragDataSetter>>>,
@@ -270,9 +274,9 @@ pub struct DragContext {
 }
 
 impl DragContext {
-    pub fn new(context: Rc<Context>, window: Weak<PlatformWindow>) -> Self {
+    pub fn new(context: &ContextRef, window: Weak<PlatformWindow>) -> Self {
         Self {
-            context: context.clone(),
+            context: context.weak(),
             window,
             data_adapters: vec![
                 Box::new(UriListDataAdapter::new()),
@@ -288,8 +292,10 @@ impl DragContext {
         let mut data = self.data.borrow_mut();
         data.clear();
 
-        for a in &self.context.options.custom_drag_data_adapters {
-            data.append(&mut a.prepare_drag_data(&mut properties));
+        if let Some(context) = self.context.get() {
+            for a in &context.options.custom_drag_data_adapters {
+                data.append(&mut a.prepare_drag_data(&mut properties));
+            }
         }
         for a in &self.data_adapters {
             data.append(&mut a.prepare_drag_data(&mut properties));
@@ -321,14 +327,14 @@ impl DragContext {
         let drag_event = events
             .values()
             .filter(|e| {
-                e.get_event_type() == EventType::ButtonPress
-                    || e.get_event_type() == EventType::MotionNotify
+                e.event_type() == EventType::ButtonPress
+                    || e.event_type() == EventType::MotionNotify
             })
-            .max_by(|e1, e2| e1.get_time().cmp(&e2.get_time()));
+            .max_by(|e1, e2| e1.time().cmp(&e2.time()));
 
         let button = events
             .get(&EventType::ButtonPress)
-            .and_then(|e| e.get_button())
+            .and_then(|e| e.button())
             .unwrap_or(0);
 
         let targets = self.prepare_data(&mut request);
@@ -342,22 +348,17 @@ impl DragContext {
             -1,
         );
 
-        let event_coords = drag_event
-            .and_then(|e| e.get_coords())
-            .unwrap_or((0.0, 0.0));
+        let event_coords = drag_event.and_then(|e| e.coords()).unwrap_or((0.0, 0.0));
 
         if let Some(context) = context {
             let surface = &Self::surface_from_image_data(request.image);
-            let scale_factor = widget.get_scale_factor() as f64;
-            surface.set_device_scale(
-                widget.get_scale_factor() as f64,
-                widget.get_scale_factor() as f64,
-            );
+            let scale_factor = widget.scale_factor() as f64;
+            surface.set_device_scale(widget.scale_factor() as f64, widget.scale_factor() as f64);
             surface.set_device_offset(
                 (request.rect.x - event_coords.0) * scale_factor,
                 (request.rect.y - event_coords.1) * scale_factor,
             );
-            context.drag_set_icon_surface(&surface)
+            context.drag_set_icon_surface(surface)
         }
 
         self.dragging.replace(true);
@@ -419,7 +420,7 @@ impl DragContext {
         if self.dragging.get() {
             // if failes it means drag faile
             self.cleanup();
-            let action = context.get_selected_action();
+            let action = context.selected_action();
             let action = DropContext::convert_drag_actions_from_gtk(action)
                 .first()
                 .cloned()

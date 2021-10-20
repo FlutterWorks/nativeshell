@@ -1,3 +1,7 @@
+use super::{all_bindings::*, bindings::Windows::Win32::Graphics::Dxgi::*};
+use crate::util::OkLog;
+use detour::RawDetour;
+use lazy_static::lazy_static;
 use std::{
     cell::Cell,
     ffi::c_void,
@@ -5,15 +9,7 @@ use std::{
     slice,
     sync::Mutex,
 };
-
-use detour::RawDetour;
 use windows::{Guid, IUnknown, Interface, RawPtr, HRESULT};
-
-use crate::util::OkLog;
-
-use super::util::HRESULTExt;
-
-use super::{all_bindings::*, bindings::Windows::Win32::Graphics::Dxgi::*};
 
 type CreateTargetForHwndT = unsafe extern "system" fn(
     this: RawPtr,
@@ -283,8 +279,7 @@ unsafe extern "system" fn d3d11_create_device(
 
     if let Some(device) = (&*pp_device).clone() {
         let device = device.cast::<IDXGIDevice>().unwrap();
-        let mut adapter: Option<IDXGIAdapter> = None;
-        device.GetAdapter(&mut adapter as *mut _).ok_log();
+        let adapter: Option<IDXGIAdapter> = device.GetAdapter().ok_log();
         if let Some(adapter) = adapter {
             let factory = adapter
                 .GetParent::<IDXGIFactory>()

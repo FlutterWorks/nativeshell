@@ -1,22 +1,25 @@
 #![allow(clippy::from_over_into)]
 
-use std::{mem::ManuallyDrop, os::raw::c_char};
+use std::{
+    mem::ManuallyDrop,
+    os::raw::{c_char, c_void},
+};
 
 use super::flutter_sys;
-use glib::{glib_wrapper, Object};
-use glib::{translate::*, Bytes};
+use glib::{translate::*, Bytes, Object};
 use gtk::{Container, Widget};
 
-use glib::object::Cast;
-use glib::object::IsA;
-use glib::GString;
+use glib::{
+    object::{Cast, IsA},
+    GString,
+};
 
-glib_wrapper! {
+glib::wrapper! {
     pub struct DartProject(Object<flutter_sys::FlDartProject,
-        flutter_sys::FlDartProjectClass, DartProjectClass>);
+        flutter_sys::FlDartProjectClass>);
 
     match fn {
-        get_type => || gobject_sys::g_object_get_type(),
+        type_ => || gobject_sys::g_object_get_type(),
     }
 }
 
@@ -26,12 +29,12 @@ impl DartProject {
     }
 }
 
-glib_wrapper! {
+glib::wrapper! {
     pub struct View(Object<flutter_sys::FlView,
-        flutter_sys::FlViewClass, ViewClass>) @extends Container, Widget;
+        flutter_sys::FlViewClass>) @extends Container, Widget;
 
     match fn {
-        get_type => || gtk_sys::gtk_container_get_type(),
+        type_ => || gtk_sys::gtk_container_get_type(),
     }
 }
 
@@ -46,6 +49,7 @@ impl View {
 
 pub trait ViewExt: 'static {
     fn get_engine(&self) -> Engine;
+    fn get_registrar_for_plugin(&self, plugin: &str) -> *mut c_void;
 }
 
 impl<O: IsA<View>> ViewExt for O {
@@ -57,14 +61,23 @@ impl<O: IsA<View>> ViewExt for O {
             .unsafe_cast()
         }
     }
+
+    fn get_registrar_for_plugin(&self, plugin: &str) -> *mut c_void {
+        unsafe {
+            flutter_sys::fl_plugin_registry_get_registrar_for_plugin(
+                self.as_ref().to_glib_none().0,
+                plugin.to_glib_none().0,
+            )
+        }
+    }
 }
 
-glib_wrapper! {
+glib::wrapper! {
     pub struct Engine(Object<flutter_sys::FlEngine,
-        flutter_sys::FlEngineClass, EngineClass>);
+        flutter_sys::FlEngineClass>);
 
     match fn {
-        get_type => || gobject_sys::g_object_get_type(),
+        type_ => || gobject_sys::g_object_get_type(),
     }
 }
 
@@ -83,21 +96,21 @@ impl<O: IsA<Engine>> EngineExt for O {
     }
 }
 
-glib_wrapper! {
+glib::wrapper! {
     pub struct BinaryMessenger(Object<flutter_sys::FlBinaryMessenger,
-        flutter_sys::FlBinaryMessengerClass, BinaryMessengerClass>);
+        flutter_sys::FlBinaryMessengerClass>);
 
     match fn {
-        get_type => || gobject_sys::g_object_get_type(),
+        type_ => || gobject_sys::g_object_get_type(),
     }
 }
 
-glib_wrapper! {
+glib::wrapper! {
     pub struct BinaryMessengerResponseHandle(Object<flutter_sys::FlBinaryMessengerResponseHandle,
-        flutter_sys::FlBinaryMessengerResponseHandleClass, BinaryMessengerResponseHandleClass>);
+        flutter_sys::FlBinaryMessengerResponseHandleClass>);
 
     match fn {
-        get_type => || gobject_sys::g_object_get_type(),
+        type_ => || gobject_sys::g_object_get_type(),
     }
 }
 

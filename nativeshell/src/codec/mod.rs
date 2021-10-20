@@ -1,15 +1,16 @@
 use crate::Error;
 
 pub use self::value::Value;
-
 pub mod value;
 
 mod message_channel;
 mod method_channel;
+mod sender;
 mod standard_codec;
 
 pub use message_channel::*;
 pub use method_channel::*;
+pub use sender::*;
 pub use standard_codec::*;
 
 pub struct MethodCall<V> {
@@ -17,13 +18,24 @@ pub struct MethodCall<V> {
     pub args: V,
 }
 
-type MethodCallResult<V> = Result<V, MethodCallError<V>>;
+pub type MethodCallResult<V> = Result<V, MethodCallError<V>>;
 
 #[derive(Debug, Clone)]
 pub struct MethodCallError<V> {
     pub code: String,
     pub message: Option<String>,
     pub details: V,
+}
+
+impl<T> std::fmt::Display for MethodCallError<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.message {
+            Some(message) => {
+                write!(f, "{} ({})", message, self.code)
+            }
+            None => write!(f, "{}", self.code),
+        }
+    }
 }
 
 impl<V> MethodCallError<V> {

@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/cupertino.dart';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -326,8 +325,7 @@ class _MenuBarInternalState extends State<MenuBarInternal>
     return _elements.any((element) => !element.item.disabled);
   }
 
-  bool _onRawKeyEvent(RawKeyEventEx _event) {
-    final event = _event.event;
+  bool _onRawKeyEvent(RawKeyEvent event) {
     final hasEnabledElements = _hasEnabledElements;
     var focusRequested = false;
 

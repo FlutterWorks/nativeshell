@@ -1,18 +1,16 @@
 use std::{collections::HashMap, ffi::CStr};
 
+use super::utils::{from_nsstring, to_nsdata, to_nsstring};
+use crate::{
+    codec::{MessageCodec, StandardMethodCodec, Value},
+    shell::{api_constants::drag_data, ContextOptions},
+};
 use cocoa::{
     base::{id, nil},
     foundation::NSArray,
 };
 use log::warn;
-use objc::rc::StrongPtr;
-
-use crate::{
-    codec::{MessageCodec, StandardMethodCodec, Value},
-    shell::{api_constants::drag_data, ContextOptions},
-};
-
-use super::utils::{from_nsstring, to_nsdata, to_nsstring};
+use objc::{class, msg_send, rc::StrongPtr, sel, sel_impl};
 
 pub trait DragDataAdapter {
     // Retrieve data from given pasteboard
@@ -233,7 +231,7 @@ impl DragDataAdapter for FallThroughDragDataAdapter {
                 let bytes: *const u8 = msg_send![data, bytes];
                 let length: usize = msg_send![data, length];
                 let data: &[u8] = std::slice::from_raw_parts(bytes, length);
-                let value = codec.decode_message(&data).unwrap();
+                let value = codec.decode_message(data).unwrap();
                 if let Value::Map(value) = value {
                     for entry in value {
                         if let Value::String(key) = entry.0 {

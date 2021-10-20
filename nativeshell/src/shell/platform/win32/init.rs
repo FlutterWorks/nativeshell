@@ -1,16 +1,14 @@
-use std::{ptr::null_mut, rc::Rc};
-
-use crate::shell::Context;
+use std::ptr::null_mut;
 
 use super::{
     all_bindings::*,
     dpi::become_dpi_aware,
     dxgi_hook::init_dxgi_hook,
-    error::PlatformResult,
-    util::{direct_composition_supported, HRESULTExt},
+    error::{PlatformError, PlatformResult},
+    util::direct_composition_supported,
 };
 
-pub fn init_platform(_context: Rc<Context>) -> PlatformResult<()> {
+pub fn init_platform() -> PlatformResult<()> {
     unsafe {
         // Angle will try opening these with GetModuleHandleEx, which means they need to be
         // loaded first; Otherwise it falls back to d3dcompiler_47, which is not present on
@@ -22,9 +20,8 @@ pub fn init_platform(_context: Rc<Context>) -> PlatformResult<()> {
             }
         }
 
-        CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED).as_platform_result()?;
-
-        OleInitialize(null_mut()).as_platform_result()?;
+        CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED).map_err(PlatformError::from)?;
+        OleInitialize(null_mut()).map_err(PlatformError::from)?;
 
         // Needed for direct composition check
         LoadLibraryW("dcomp.dll");

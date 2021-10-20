@@ -122,7 +122,9 @@ class MenuItem {
           title == other.title &&
           (submenu == null) == (other.submenu == null) &&
           role == other.role &&
-          checkStatus == other.checkStatus);
+          checkStatus == other.checkStatus &&
+          accelerator == other.accelerator &&
+          (action == null) == (other.action == null));
 
   @override
   int get hashCode => hashValues(title, separator, submenu != null);
@@ -153,12 +155,14 @@ class Menu {
   Menu(
     this.builder, {
     this.role,
+    this.onOpen,
   }) {
     state = MenuState(this);
   }
 
   final MenuBuilder builder;
   final MenuRole? role;
+  final VoidCallback? onOpen;
 
   // Internal state of the menu
   late final MenuState state;

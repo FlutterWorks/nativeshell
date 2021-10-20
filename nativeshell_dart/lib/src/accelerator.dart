@@ -1,15 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'key_interceptor.dart';
+import 'keyboard_map.dart';
 import 'menu.dart';
 
-class AcceleratorKey {
-  AcceleratorKey(this.key, this.label);
-
-  final LogicalKeyboardKey key;
-  final String label;
-}
-
+// Defines a keyboard shortcut.
+// Can be conveniently constructed:
+//
+// import 'package:nativeshell/accelerators.dart';
+// final accelerator1 = cmdOrCtrl + shift + 'e';
+// final accelerator2 = alt + f1;
 class Accelerator {
   const Accelerator({
     this.key,
@@ -19,15 +19,37 @@ class Accelerator {
     this.shift = false,
   });
 
-  final AcceleratorKey? key;
+  final KeyboardKey? key;
   final bool alt;
   final bool control;
   final bool meta;
   final bool shift;
 
+  String get label {
+    final k = key;
+    if (k is LogicalKeyboardKey) {
+      return k.keyLabel;
+    } else if (k is PhysicalKeyboardKey) {
+      // on macOS CMD (meta) on some keyboards (SVK) resulsts in US key code.
+      // So we need to take that into account when generating labels
+      // (used for key equivalents on NSMenuItem) otherwise the shortcut won't
+      // be matched.
+      final logical =
+          KeyboardMap.current().getLogicalKeyForPhysicalKey(k, meta: meta);
+      if (logical != null) {
+        return logical.keyLabel;
+      }
+    }
+    return '??';
+  }
+
   Accelerator operator +(dynamic that) {
     if (that is num) {
       that = '$that';
+    }
+
+    if (that is KeyboardKey) {
+      that = Accelerator(key: that);
     }
 
     if (that is String) {
@@ -35,9 +57,7 @@ class Accelerator {
       final lower = that.toLowerCase();
       return this +
           Accelerator(
-              key: AcceleratorKey(
-                  _keyForCodeUnit(lower.codeUnits[0]), that.toUpperCase()),
-              shift: lower != that);
+              key: _keyForCodeUnit(lower.codeUnits[0]), shift: lower != that);
     } else if (that is Accelerator) {
       return Accelerator(
           key: that.key ?? key,
@@ -59,19 +79,26 @@ class Accelerator {
           control == other.control &&
           meta == other.meta &&
           shift == other.shift &&
-          key?.key == other.key?.key);
+          key == other.key);
 
   @override
-  int get hashCode => hashValues(alt, control, meta, shift, key?.key);
+  int get hashCode => hashValues(alt, control, meta, shift, key);
 
-  bool matches(RawKeyEventEx event) {
-    final key = this.key?.key;
-    return event.altPressed == alt &&
-        event.controlPressed == control &&
-        event.metaPressed == meta &&
-        event.shiftPressed == shift &&
-        key != null &&
-        (key == event.keyWithoutModifiers || key == event.keyWithoutModifiers2);
+  bool matches(RawKeyEvent event) {
+    final key = this.key;
+    if (key != null) {
+      final physicalKey = key is PhysicalKeyboardKey
+          ? key
+          : KeyboardMap.current()
+              .getPhysicalKeyForLogicalKey(key as LogicalKeyboardKey);
+      return event.isAltPressed == alt &&
+          event.isControlPressed == control &&
+          event.isMetaPressed == meta &&
+          event.isShiftPressed == shift &&
+          physicalKey == event.physicalKey;
+    } else {
+      return false;
+    }
   }
 
   LogicalKeyboardKey _keyForCodeUnit(int codeUnit) {
@@ -85,7 +112,7 @@ class Accelerator {
 
   dynamic serialize() => key != null
       ? {
-          'label': key!.label,
+          'label': label,
           'alt': alt,
           'shift': shift,
           'meta': meta,
@@ -116,9 +143,9 @@ class AcceleratorRegistry {
     _menus.remove(menu);
   }
 
-  bool _handleKeyEvent(RawKeyEventEx event) {
+  bool _handleKeyEvent(RawKeyEvent event) {
     var handled = false;
-    if (event.event is RawKeyDownEvent) {
+    if (event is RawKeyDownEvent) {
       for (final a in _accelerators.entries) {
         if (a.key.matches(event)) {
           a.value();

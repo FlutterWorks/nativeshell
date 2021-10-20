@@ -6,7 +6,7 @@ use std::{
 use crate::{
     error::IOResultExt,
     util::{get_absolute_path, get_artifacts_dir, mkdir, symlink},
-    BuildResult, FileOperation, Resources,
+    BuildResult, FileOperation, Flutter, Resources,
 };
 
 #[derive(Debug, Clone)]
@@ -33,9 +33,7 @@ impl Default for AppBundleOptions {
             bundle_display_name: std::env::var("CARGO_PKG_NAME").unwrap(),
             bundle_version: std::env::var("CARGO_PKG_VERSION").unwrap(),
             bundle_short_version_string: std::env::var("CARGO_PKG_VERSION").unwrap(),
-            // TODO: This need better default
-            minimum_system_version: std::env::var("MACOSX_DEPLOYMENT_TARGET")
-                .unwrap_or_else(|_| "10.13".into()),
+            minimum_system_version: Flutter::macosx_deployment_target(),
             executable_path: std::env::var("CARGO_PKG_NAME").unwrap().into(),
             icon_file: "App.icns".into(),
             info_plist_template: None,
@@ -65,7 +63,7 @@ impl MacOSBundle {
 
         if bundle_path.exists() {
             std::fs::remove_dir_all(&bundle_path)
-                .unwrap_or_else(|_| panic!("Failed to remove {:?}", bundle_path));
+                .wrap_error(FileOperation::RemoveDir, || bundle_path.clone())?;
         }
 
         mkdir::<_, PathBuf>(&bundle_path, None)?;
@@ -129,7 +127,7 @@ impl MacOSBundle {
         );
 
         for (key, value) in &self.options.info_plist_additional_args {
-            Self::replace_plist_value(&mut template, &key, &value);
+            Self::replace_plist_value(&mut template, key, value);
         }
 
         let plist = contents.as_ref().join("Info.plist");
@@ -149,7 +147,7 @@ impl MacOSBundle {
                 let content = std::fs::read_to_string(&path);
                 content.wrap_error(FileOperation::Read, || path)
             }
-            None => Ok(include_str!("Info.plist").into()),
+            None => Ok(include_str!("res/macos/Info.plist").into()),
         }
     }
 }

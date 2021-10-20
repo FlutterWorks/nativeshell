@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -8,8 +7,6 @@ import 'package:flutter/rendering.dart';
 import 'api_constants.dart';
 import 'api_model.dart';
 import 'util.dart';
-import 'window.dart';
-import 'window_method_channel.dart';
 
 enum DragEffect {
   None,
@@ -19,15 +16,17 @@ enum DragEffect {
 }
 
 typedef DragDataEncode<T> = dynamic Function(T value);
-typedef DragDataDecode<T> = T Function(dynamic value);
+typedef DragDataDecode<T> = T? Function(dynamic value);
 
 dynamic _defaultEncode<T>(T t) => t;
 T _defaultDecode<T>(dynamic t) => t;
 
 class DragDataKey<T> {
-  DragDataKey(String name,
-      [DragDataEncode<T>? encode, DragDataDecode<T>? decode])
-      : _name = name,
+  DragDataKey(
+    String name, {
+    DragDataEncode<T>? encode,
+    DragDataDecode<T>? decode,
+  })  : _name = name,
         _encode = encode ?? _defaultEncode,
         _decode = decode ?? _defaultDecode;
 
@@ -69,12 +68,12 @@ dynamic _encodeFiles(List<String> files) {
 
 class DragData {
   // Predefined keys
-  static final files =
-      DragDataKey<List<String>>(Keys.dragDataFiles, _encodeFiles, _decodeFiles);
+  static final files = DragDataKey<List<String>>(Keys.dragDataFiles,
+      encode: _encodeFiles, decode: _decodeFiles);
 
   // While this is defined as List, only one URI is supported on Windows
-  static final uris =
-      DragDataKey<List<Uri>>(Keys.dragDataURLs, _encodeURLs, _decodeURLs);
+  static final uris = DragDataKey<List<Uri>>(Keys.dragDataURLs,
+      encode: _encodeURLs, decode: _decodeURLs);
 
   // Usage
   //
@@ -93,8 +92,8 @@ class DragData {
   }
 
   Future<T?> get<T>(DragDataKey<T> key) async {
-    // access to values is async for future proofing;
-    /// Some platforms allow accessing data asynchronously
+    // Access to values is async for future proofing;
+    // Some platforms may only allow accessing data asynchronously
     final res = _properties[key._name];
     if (res != null) {
       return key._decode(res);
@@ -122,19 +121,52 @@ class DropEvent {
     required this.info,
   });
 
-  DropEvent transformed(Matrix4 matrix) {
-    return DropEvent(
-      info:
-          info.withLocation(MatrixUtils.transformPoint(matrix, info.location)),
-    );
-  }
-
   @override
   String toString() {
     return 'DragEvent: ${info.toString()}';
   }
 
   final DragInfo info;
+}
+
+typedef DropMonitorListener = void Function(DropEvent event,
+    {required bool isInside});
+
+// Widget that passively listens for drop events. Unlike (Raw)DropRegion,
+// DropMonitor can not set drop effect and does not get performDrop
+// notifications, however there can be multiple DropMonitor widgets nested
+// and each of them will get the notification, whereas there can be only one
+// DropRegion active.
+// After first notification, DropMonitor will keep getting notifications until
+// drop pointer leaves the window. Check the `isInside` argument in
+// DropMonitorListener to see whether the pointer is inside monitor.
+class DropMonitor extends SingleChildRenderObjectWidget {
+  final DropMonitorListener? onDropOver;
+  final DropExitListener? onDropExit;
+  final HitTestBehavior behavior;
+
+  DropMonitor({
+    Key? key,
+    Widget? child,
+    this.onDropOver,
+    this.onDropExit,
+    this.behavior = HitTestBehavior.deferToChild,
+  }) : super(key: key, child: child);
+
+  @override
+  RenderObject createRenderObject(BuildContext context) {
+    return _RenderDropMonitor(
+        onDropOver: onDropOver, onDropExit: onDropExit, behavior: behavior);
+  }
+
+  @override
+  void updateRenderObject(
+      BuildContext context, _RenderDropMonitor renderObject) {
+    renderObject
+      ..onDropOver = onDropOver
+      ..onDropExit = onDropExit
+      ..behavior = behavior;
+  }
 }
 
 typedef DropEventListener = FutureOr<DragEffect> Function(DropEvent);
@@ -145,6 +177,7 @@ class RawDropRegion extends SingleChildRenderObjectWidget {
   final DropEventListener? onDropOver;
   final DropExitListener? onDropExit;
   final PerformDropListener? onPerformDrop;
+  final HitTestBehavior behavior;
 
   RawDropRegion({
     Key? key,
@@ -152,80 +185,127 @@ class RawDropRegion extends SingleChildRenderObjectWidget {
     this.onDropOver,
     this.onDropExit,
     this.onPerformDrop,
+    this.behavior = HitTestBehavior.deferToChild,
   }) : super(key: key, child: child);
 
   @override
   RenderObject createRenderObject(BuildContext context) {
-    return RenderDropRegion(
+    return _RenderDropRegion(
         onDropOver: onDropOver,
         onDropExit: onDropExit,
-        onPerformDrop: onPerformDrop);
+        onPerformDrop: onPerformDrop,
+        behavior: behavior);
   }
 
   @override
-  void updateRenderObject(BuildContext context, RenderDropRegion renderObject) {
+  void updateRenderObject(
+      BuildContext context, _RenderDropRegion renderObject) {
     renderObject
       ..onDropOver = onDropOver
       ..onDropExit = onDropExit
-      ..onPerformDrop = onPerformDrop;
+      ..onPerformDrop = onPerformDrop
+      ..behavior = behavior;
   }
 }
 
-class RenderDropRegion extends RenderProxyBox {
-  FutureOr<DragEffect> handleOnDrop(DropEvent event, HitTestEntry entry) async {
+class _RenderDropRegion extends RenderProxyBoxWithHitTestBehavior {
+  FutureOr<DragEffect> handleOnDrop(DropEvent event) async {
     final onDropOver = this.onDropOver;
     if (onDropOver != null) {
-      return onDropOver(
-          event.transformed(entry.transform ?? Matrix4.identity()));
+      final transformed = DropEvent(
+          info: event.info
+              .withPosition(globalToLocal(event.info.globalPosition)));
+      return onDropOver(transformed);
     } else {
       return DragEffect.None;
     }
   }
 
-  void handleOnDropExit(HitTestEntry entry) {
+  void handleOnDropExit() {
     final onDropExit = this.onDropExit;
     if (onDropExit != null) {
       onDropExit();
     }
   }
 
-  void handlePerformDrop(DropEvent event, HitTestEntry entry) {
+  void handlePerformDrop(DropEvent event) {
     final onPerformDrop = this.onPerformDrop;
     if (onPerformDrop != null) {
-      onPerformDrop(event.transformed(entry.transform ?? Matrix4.identity()));
+      final transformed = DropEvent(
+          info: event.info
+              .withPosition(globalToLocal(event.info.globalPosition)));
+      onPerformDrop(transformed);
     }
   }
 
-  RenderDropRegion(
-      {this.onDropOver, this.onDropExit, this.onPerformDrop, RenderBox? child})
-      : super(child);
+  _RenderDropRegion({
+    this.onDropOver,
+    this.onDropExit,
+    this.onPerformDrop,
+    RenderBox? child,
+    required HitTestBehavior behavior,
+  }) : super(behavior: behavior, child: child);
 
   DropEventListener? onDropOver;
   DropExitListener? onDropExit;
   PerformDropListener? onPerformDrop;
 }
 
+class _RenderDropMonitor extends RenderProxyBoxWithHitTestBehavior {
+  void handleOnDrop(DropEvent event, {required bool isInside}) {
+    final onDropOver = this.onDropOver;
+    if (onDropOver != null) {
+      final transformed = DropEvent(
+          info: event.info
+              .withPosition(globalToLocal(event.info.globalPosition)));
+      onDropOver(transformed, isInside: isInside);
+    }
+  }
+
+  void handleOnDropExit() {
+    final onDropExit = this.onDropExit;
+    if (onDropExit != null) {
+      onDropExit();
+    }
+  }
+
+  _RenderDropMonitor({
+    this.onDropOver,
+    this.onDropExit,
+    RenderBox? child,
+    required HitTestBehavior behavior,
+  }) : super(behavior: behavior, child: child);
+
+  DropMonitorListener? onDropOver;
+  DropExitListener? onDropExit;
+}
+
 class DragInfo {
   DragInfo({
-    required this.location,
+    required this.position,
+    required this.globalPosition,
     required this.data,
     required this.allowedEffects,
   });
 
-  final Offset location;
+  final Offset position;
+  final Offset globalPosition;
   final DragData data;
   final Set<DragEffect> allowedEffects;
 
-  DragInfo withLocation(Offset location) => DragInfo(
-        location: location,
+  DragInfo withPosition(Offset position) => DragInfo(
+        position: position,
+        globalPosition: globalPosition,
         data: data,
         allowedEffects: allowedEffects,
       );
 
   static DragInfo deserialize(dynamic value) {
     final map = value as Map;
+    final position = OffsetExt.deserialize(map['location']);
     return DragInfo(
-        location: OffsetExt.deserialize(map['location']),
+        position: position,
+        globalPosition: position,
         data: DragData.deserialize(map['data']),
         allowedEffects: Set<DragEffect>.from((map['allowedEffects'] as List)
             .map(
@@ -233,7 +313,7 @@ class DragInfo {
   }
 
   Map serialize() => {
-        'location': location.serialize(),
+        'location': position.serialize(),
         'data': data.serialize(),
         'allowedEffects': allowedEffects.map((e) => enumToString(e)).toList(),
       };
@@ -249,6 +329,7 @@ class DropRegion extends StatefulWidget {
     this.onDropExit,
     this.onDropOver,
     this.onPerformDrop,
+    this.behavior = HitTestBehavior.deferToChild,
     required this.child,
   }) : super(key: key);
 
@@ -256,11 +337,26 @@ class DropRegion extends StatefulWidget {
   final VoidCallback? onDropExit;
   final DropEventListener? onDropOver;
   final PerformDropListener? onPerformDrop;
+  final HitTestBehavior behavior;
   final Widget child;
 
   @override
   State<StatefulWidget> createState() {
     return DropRegionState();
+  }
+}
+
+class DropListener extends StatelessWidget {
+  const DropListener({
+    Key? key,
+    required this.child,
+  }) : super(key: key);
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return MetaData();
   }
 }
 
@@ -273,6 +369,7 @@ class DropRegionState extends State<DropRegion> {
       onDropOver: _onDropOver,
       onDropExit: _onDropExit,
       onPerformDrop: _onPerformDrop,
+      behavior: widget.behavior,
       child: widget.child,
     );
   }
@@ -313,182 +410,66 @@ class DropRegionState extends State<DropRegion> {
   }
 }
 
-final _dragSourceChannel = WindowMethodChannel(Channels.dragSource);
+class DragDriver {
+  _RenderDropRegion? _lastDropRegion;
+  final _allDropMonitors = <_RenderDropMonitor>{};
 
-class DragException implements Exception {
-  final String message;
-  DragException(this.message);
-}
-
-class DragSession {
-  static DragSession? currentSession() {
-    return _DragSessionManager.instance.activeSession;
-  }
-
-  static Future<DragSession> beginWithContext({
-    required BuildContext context,
-    required DragData data,
-    required List<DragEffect> allowedEffects,
-  }) async {
-    final renderObject_ = context.findRenderObject();
-    final renderObject = renderObject_ is RenderRepaintBoundary
-        ? renderObject_
-        : context.findAncestorRenderObjectOfType<RenderRepaintBoundary>();
-
-    if (renderObject == null) {
-      throw DragException("Couldn't find any repaint boundary ancestor");
-    }
-
-    final pr = MediaQuery.of(context).devicePixelRatio;
-    final snapshot = await renderObject.toImage(pixelRatio: pr);
-    final rect = MatrixUtils.transformRect(renderObject.getTransformTo(null),
-        Rect.fromLTWH(0, 0, renderObject.size.width, renderObject.size.height));
-    return DragSession.beginWithImage(
-        window: Window.of(context),
-        image: snapshot,
-        rect: rect,
-        data: data,
-        allowedEffects: allowedEffects);
-  }
-
-  static Future<DragSession> beginWithImage({
-    required LocalWindow window,
-    required ui.Image image,
-    required Rect rect,
-    required DragData data,
-    required List<DragEffect> allowedEffects,
-  }) async {
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-
-    await _dragSourceChannel
-        .invokeMethod(window.handle, Methods.dragSourceBeginDragSession, {
-      'image': {
-        'width': image.width,
-        'height': image.height,
-        'bytesPerRow': image.width * 4,
-        'data': bytes!.buffer.asUint8List()
-      },
-      'rect': rect.serialize(),
-      'data': data.serialize(),
-      'allowedEffects':
-          allowedEffects.map<String>((e) => enumToString(e)).toList(),
-    });
-
-    final res = DragSession();
-    _DragSessionManager.instance.registerSession(res);
-    return res;
-  }
-
-  Future<DragEffect> waitForResult() async {
-    if (_result != null) {
-      return _result!;
-    } else {
-      return _completer.future;
-    }
-  }
-
-  void _setResult(DragEffect result) {
-    _result = result;
-    _completer.complete(_result);
-  }
-
-  DragEffect? _result;
-  final _completer = Completer<DragEffect>();
-}
-
-class _DragSessionManager {
-  static final instance = _DragSessionManager();
-
-  _DragSessionManager() {
-    _dragSourceChannel.setMethodCallHandler(_onMethodCall);
-  }
-
-  Future<dynamic> _onMethodCall(WindowMethodCall call) async {
-    if (call.method == Methods.dragSourceDragSessionEnded) {
-      final result =
-          enumFromString(DragEffect.values, call.arguments, DragEffect.None);
-      assert(_activeSessions.isNotEmpty,
-          'Received drag session notification without active drag session.');
-      final session = _activeSessions.removeAt(0);
-      session._setResult(result);
-    }
-  }
-
-  DragSession? get activeSession =>
-      _activeSessions.isEmpty ? null : _activeSessions.last;
-
-  void registerSession(DragSession session) {
-    _activeSessions.add(session);
-  }
-
-  // It is possible to have more than one active session; MacOS drag session finished
-  // notification can be delayed so we might have nother session already in progress;
-  // Last value is current session
-  final _activeSessions = <DragSession>[];
-}
-
-class DropTarget {
-  RenderDropRegion? _lastDropRegion;
-  HitTestEntry? _lastDropRegionEntry;
-
-  Future<DragEffect> _draggingUpdated(DragInfo info) async {
+  Future<DragEffect> draggingUpdated(DragInfo info) async {
     var res = DragEffect.None;
     final hitTest = HitTestResult();
     final event = DropEvent(info: info);
-    RenderDropRegion? dropRegion;
-    HitTestEntry? entry;
-    GestureBinding.instance!.hitTest(hitTest, info.location);
+    _RenderDropRegion? dropRegion;
+    final monitors = <_RenderDropMonitor>[];
+
+    GestureBinding.instance!.hitTest(hitTest, info.position);
+
     for (final item in hitTest.path) {
       final target = item.target;
-      if (target is RenderDropRegion) {
-        res = await target.handleOnDrop(event, item);
+      if (target is _RenderDropRegion && dropRegion == null) {
+        res = await target.handleOnDrop(event);
         if (res != DragEffect.None) {
           dropRegion = target;
-          entry = item;
-          break;
         }
+      }
+      if (target is _RenderDropMonitor) {
+        monitors.add(target);
       }
     }
     if (_lastDropRegion != dropRegion && _lastDropRegion != null) {
-      _lastDropRegion!.handleOnDropExit(_lastDropRegionEntry!);
+      _lastDropRegion!.handleOnDropExit();
     }
     _lastDropRegion = dropRegion;
-    _lastDropRegionEntry = entry;
+
+    monitors.forEach((element) => element.handleOnDrop(event, isInside: true));
+
+    _allDropMonitors.forEach((element) {
+      if (!monitors.contains(element)) {
+        element.handleOnDrop(event, isInside: false);
+      }
+    });
+    _allDropMonitors.addAll(monitors);
 
     return res;
   }
 
-  void _draggingExited() {
+  void draggingExited() {
     if (_lastDropRegion != null) {
-      _lastDropRegion!.handleOnDropExit(_lastDropRegionEntry!);
+      _lastDropRegion!.handleOnDropExit();
       _lastDropRegion = null;
-      _lastDropRegionEntry = null;
     }
+    _allDropMonitors.forEach((element) => element.handleOnDropExit());
+    _allDropMonitors.clear();
   }
 
-  void _performDrop(DragInfo info) async {
-    final res = await _draggingUpdated(info);
+  void performDrop(DragInfo info) async {
+    final res = await draggingUpdated(info);
     if (res != DragEffect.None) {
       assert(_lastDropRegion != null);
       final event = DropEvent(info: info);
-      _lastDropRegion!.handlePerformDrop(event, _lastDropRegionEntry!);
+      _lastDropRegion!.handlePerformDrop(event);
       _lastDropRegion = null;
-      _lastDropRegionEntry = null;
     }
-  }
-
-  Future<dynamic> onMethodCall(WindowMethodCall call) async {
-    if (call.method == Methods.dropTargetDraggingUpdated) {
-      final info = DragInfo.deserialize(call.arguments);
-      final res = await _draggingUpdated(info);
-      return {
-        'effect': enumToString(res),
-      };
-    } else if (call.method == Methods.dropTargetDraggingExited) {
-      return _draggingExited();
-    } else if (call.method == Methods.dropTargetPerformDrop) {
-      final info = DragInfo.deserialize(call.arguments);
-      return _performDrop(info);
-    }
+    _allDropMonitors.forEach((element) => element.handleOnDropExit());
+    _allDropMonitors.clear();
   }
 }

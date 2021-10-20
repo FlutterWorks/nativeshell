@@ -1,36 +1,10 @@
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    ffi::c_void,
-    rc::{Rc, Weak},
+use super::{
+    drag_context::{DragContext, NSDragOperation},
+    engine::PlatformEngine,
+    error::{PlatformError, PlatformResult},
+    menu::PlatformMenu,
+    utils::*,
 };
-
-use cocoa::{
-    appkit::{
-        NSEvent, NSEventType, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
-    },
-    base::{id, nil, BOOL, NO, YES},
-    foundation::{NSArray, NSInteger, NSPoint, NSRect, NSSize, NSUInteger},
-};
-use cocoa::{
-    appkit::{NSScreen, NSWindowTabbingMode},
-    foundation::NSProcessInfo,
-};
-
-use objc::{
-    declare::ClassDecl,
-    rc::{StrongPtr, WeakPtr},
-};
-use objc::{
-    rc::autoreleasepool,
-    runtime::{Class, Object, Sel},
-};
-
-use NSEventType::{
-    NSLeftMouseDown, NSLeftMouseUp, NSMouseEntered, NSMouseExited, NSMouseMoved, NSRightMouseDown,
-    NSRightMouseUp,
-};
-
 use crate::{
     codec::Value,
     shell::{
@@ -42,19 +16,45 @@ use crate::{
     },
     util::{LateRefCell, OkLog},
 };
-
-use super::{
-    drag_context::{DragContext, NSDragOperation},
-    engine::PlatformEngine,
-    error::{PlatformError, PlatformResult},
-    menu::PlatformMenu,
-    utils::*,
+use cocoa::{
+    appkit::{
+        CGPoint, NSApplication, NSEvent, NSEventType, NSScreen, NSView, NSViewHeightSizable,
+        NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSWindowTabbingMode, NSWindowTitleVisibility,
+    },
+    base::{id, nil, BOOL, NO, YES},
+    foundation::{
+        NSArray, NSInteger, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSUInteger,
+    },
+};
+use core_foundation::base::CFRelease;
+use core_graphics::event::CGEventType;
+use lazy_static::lazy_static;
+use objc::{
+    class,
+    declare::ClassDecl,
+    msg_send,
+    rc::{autoreleasepool, StrongPtr, WeakPtr},
+    runtime::{Class, Object, Sel},
+    sel, sel_impl,
+};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    ffi::c_void,
+    mem::ManuallyDrop,
+    rc::{Rc, Weak},
+    time::Duration,
+};
+use NSEventType::{
+    NSLeftMouseDown, NSLeftMouseDragged, NSLeftMouseUp, NSMouseEntered, NSMouseExited,
+    NSMouseMoved, NSRightMouseDown, NSRightMouseUp,
 };
 
 pub type PlatformWindowType = StrongPtr;
 
 pub struct PlatformWindow {
-    context: Rc<Context>,
+    context: Context,
     platform_window: PlatformWindowType,
     parent_platform_window: Option<WeakPtr>,
     platform_delegate: StrongPtr,
@@ -66,6 +66,10 @@ pub struct PlatformWindow {
     drag_context: LateRefCell<DragContext>,
     last_event: RefCell<HashMap<u64, StrongPtr>>,
     ignore_enter_leave_until: Cell<f64>,
+    window_buttons: StrongPtr,
+    flutter_view: LateRefCell<StrongPtr>,
+    mouse_down: Cell<bool>,
+    mouse_dragged: Cell<bool>,
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -73,9 +77,13 @@ extern "C" {
     pub static NSPasteboardTypeFileURL: id;
 }
 
+extern "C" {
+    fn im_link_objc_dummy_method();
+}
+
 impl PlatformWindow {
     pub fn new(
-        context: Rc<Context>,
+        context: Context,
         delegate: Weak<dyn PlatformWindowDelegate>,
         parent: Option<Rc<PlatformWindow>>,
     ) -> Self {
@@ -103,6 +111,9 @@ impl PlatformWindow {
 
             window.setDelegate_(*platform_delegate);
 
+            let window_buttons: id = msg_send![class!(IMWindowButtons), new];
+            let window_buttons = StrongPtr::new(window_buttons);
+
             Self {
                 context,
                 platform_window: window,
@@ -116,6 +127,10 @@ impl PlatformWindow {
                 last_event: RefCell::new(HashMap::new()),
                 drag_context: LateRefCell::new(),
                 ignore_enter_leave_until: Cell::new(0.0),
+                window_buttons,
+                flutter_view: LateRefCell::new(),
+                mouse_down: Cell::new(false),
+                mouse_dragged: Cell::new(false),
             }
         })
     }
@@ -124,24 +139,44 @@ impl PlatformWindow {
         self.weak_self.set(weak.clone());
 
         unsafe {
-            let state_ptr = Box::into_raw(Box::new(weak.clone())) as *mut c_void;
+            // dummy method to force rust to link macos_extra.a
+            im_link_objc_dummy_method();
+
+            let state_ptr = weak.clone().into_raw() as *mut c_void;
             (**self.platform_delegate).set_ivar("imState", state_ptr);
 
-            let state_ptr = Box::into_raw(Box::new(weak.clone())) as *mut c_void;
+            let state_ptr = weak.clone().into_raw() as *mut c_void;
             (**self.platform_window).set_ivar("imState", state_ptr);
 
-            let () =
-                msg_send![*self.platform_window, setContentViewController: *engine.view_controller];
+            let flutter_view: id = msg_send![*engine.view_controller, view];
+            self.flutter_view.set(StrongPtr::retain(flutter_view));
+
+            let view: id = msg_send![class!(IMContentView), alloc];
+            let view = StrongPtr::new(msg_send![view, init]);
+
+            let () = msg_send![*self.platform_window, setContentView: *view];
+            let () = msg_send![*view, addSubview: flutter_view];
+
+            // Add traffic light
+            let () = msg_send![*view, addSubview: *self.window_buttons];
 
             let () = msg_send![*engine.view_controller, setMouseTrackingMode: 3]; // always track mouse
 
             // Temporarily set non empty window size so that flutter engine doesn't complain
             NSWindow::setContentSize_(*self.platform_window, Size::wh(1.0, 1.0).into());
+
+            let () = msg_send![flutter_view, setFrame: NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(1.0, 1.0)
+            )];
+            NSView::setAutoresizingMask_(flutter_view, NSViewWidthSizable | NSViewHeightSizable);
         }
 
-        let drag_context = DragContext::new(self.context.clone(), weak);
-        drag_context.register(*self.platform_window);
-        self.drag_context.set(drag_context);
+        if let Some(context) = self.context.get() {
+            let drag_context = DragContext::new(&context, weak);
+            drag_context.register(*self.platform_window);
+            self.drag_context.set(drag_context);
+        }
     }
 
     pub fn get_platform_window(&self) -> PlatformWindowType {
@@ -359,15 +394,28 @@ impl PlatformWindow {
             let mut mask: NSWindowStyleMask = NSWindowStyleMask::NSBorderlessWindowMask;
 
             if style.frame == WindowFrame::Regular {
-                NSWindow::setMovable_(*self.platform_window, YES);
                 NSWindow::setTitlebarAppearsTransparent_(*self.platform_window, NO);
+                NSWindow::setTitleVisibility_(
+                    *self.platform_window,
+                    NSWindowTitleVisibility::NSWindowTitleVisible,
+                );
             } else {
-                NSWindow::setMovable_(*self.platform_window, NO);
                 NSWindow::setTitlebarAppearsTransparent_(*self.platform_window, YES);
+                NSWindow::setTitleVisibility_(
+                    *self.platform_window,
+                    NSWindowTitleVisibility::NSWindowTitleHidden,
+                );
             }
 
             if style.frame == WindowFrame::NoTitle {
                 mask |= NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+                let () = msg_send![*self.window_buttons, setEnabled: YES];
+                if let Some(offset) = &style.traffic_light_offset {
+                    let offset: NSPoint = offset.into();
+                    let () = msg_send![*self.window_buttons, setOrigin: offset];
+                }
+            } else {
+                let () = msg_send![*self.window_buttons, setEnabled: NO];
             }
 
             if style.frame != WindowFrame::NoFrame {
@@ -408,6 +456,21 @@ impl PlatformWindow {
         Ok(())
     }
 
+    pub fn save_position_to_string(&self) -> PlatformResult<String> {
+        unsafe {
+            let string: id = msg_send![*self.platform_window, stringWithSavedFrame];
+            Ok(from_nsstring(string))
+        }
+    }
+
+    pub fn restore_position_from_string(&self, position: String) -> PlatformResult<()> {
+        unsafe {
+            let position = to_nsstring(&position);
+            let () = msg_send![*self.platform_window, setFrameFromString:*position];
+        }
+        Ok(())
+    }
+
     pub fn is_modal(&self) -> bool {
         self.modal_close_callback.borrow().is_some()
     }
@@ -421,67 +484,83 @@ impl PlatformWindow {
         }
     }
 
-    fn show_when_ready(weak_self: Weak<PlatformWindow>) {
+    fn show_when_ready(weak_self: Weak<PlatformWindow>, attempt: i32) {
         if let Some(s) = weak_self.upgrade() {
             autoreleasepool(|| unsafe {
-                // FIXME(knopp)
-                // This code used to check surface dimensions but it no longer works.
-                // Adding metal compositing in engine broke it; The patch was reverted
-                // in the meanwhile though. Update this once the dust settles.
+                let view = s.flutter_view.borrow().clone();
 
-                // let layer = NSWindow::contentView(*s.platform_window).layer();
-                // let sublayers: id = msg_send![layer, sublayers];
-                // let first = sublayers.objectAtIndex(0);
-                // let contents: id = msg_send![first, contents];
-                // if contents != nil {
-                //     // This makes assumptions about FlutterView internals :-/
-                //     let class: id = msg_send![contents, className];
-                //     if !class.isEqualToString("IOSurface") {
-                //         panic!("Expected IOSurface content");
-                //     }
-                //     let scale = NSWindow::backingScaleFactor(*s.platform_window);
-                //     let content_size = NSView::frame(NSWindow::contentView(*s.platform_window));
-
-                //     let expected_width = scale * content_size.size.width;
-                //     let expected_height = scale * content_size.size.height;
-                //     // IOSurface width/height
-                //     let actual_width: NSInteger = msg_send![contents, width];
-                //     let actual_height: NSInteger = msg_send![contents, height];
-
-                //     // only show if size matches, otherwise we caught the view during resizing
-                //     if actual_width == expected_width as NSInteger
-                //         && actual_height == expected_height as NSInteger
-                //     {
-                s.actually_show();
-                if let Some(delegate) = s.delegate.upgrade() {
-                    delegate.visibility_changed(true);
+                let subviews: id = msg_send![*view, subviews];
+                let view = {
+                    if subviews.count() > 0 {
+                        subviews.objectAtIndex(0)
+                    } else {
+                        *view
+                    }
                 };
-                return;
-                // }
-                // }
-                // wait until we have content generated (with proper size)
-                // s.context
-                //     .run_loop
-                //     .borrow()
-                //     .schedule(Duration::from_secs_f64(1.0 / 60.0), move || {
-                //         Self::show_when_ready(weak_self)
-                //     })
-                //     .detach();
-            })
+
+                // If our assumptions about the layout below are wrong, don't keep
+                // waiting indefinitely.
+                let mut show = attempt == 5;
+
+                if !show {
+                    let layer = view.layer();
+                    let sublayers: id = msg_send![layer, sublayers];
+                    let first = sublayers.objectAtIndex(0);
+                    let contents: id = msg_send![first, contents];
+                    if contents != nil {
+                        // This makes assumptions about FlutterView internals :-/
+                        let class: id = msg_send![contents, className];
+                        if !class.isEqualToString("IOSurface") {
+                            panic!("Expected IOSurface content");
+                        }
+                        let scale = NSWindow::backingScaleFactor(*s.platform_window);
+                        let content_size = NSView::frame(*s.flutter_view.borrow().clone());
+
+                        let expected_width = scale * content_size.size.width;
+                        let expected_height = scale * content_size.size.height;
+                        // IOSurface width/height
+                        let actual_width: NSInteger = msg_send![contents, width];
+                        let actual_height: NSInteger = msg_send![contents, height];
+
+                        // only show if size matches, otherwise we caught the view during resizing
+                        if actual_width == expected_width as NSInteger
+                            && actual_height == expected_height as NSInteger
+                        {
+                            show = true;
+                        }
+                    }
+                }
+
+                if show {
+                    s.actually_show();
+                    if let Some(delegate) = s.delegate.upgrade() {
+                        delegate.visibility_changed(true);
+                    };
+                } else if let Some(context) = s.context.get() {
+                    // wait until we have content generated (with proper size)
+                    context
+                        .run_loop
+                        .borrow()
+                        .schedule(Duration::from_secs_f64(1.0 / 60.0), move || {
+                            Self::show_when_ready(weak_self, attempt + 1)
+                        })
+                        .detach();
+                }
+            });
         }
     }
 
     pub fn ready_to_show(&self) -> PlatformResult<()> {
         self.ready_to_show.set(true);
         if self.show_when_ready.get() {
-            Self::show_when_ready(self.weak_self.clone_value());
+            Self::show_when_ready(self.weak_self.clone_value(), 0);
         }
         Ok(())
     }
 
     pub fn show(&self) -> PlatformResult<()> {
         if self.ready_to_show.get() {
-            Self::show_when_ready(self.weak_self.clone_value());
+            Self::show_when_ready(self.weak_self.clone_value(), 0);
         } else {
             self.show_when_ready.set(true);
         }
@@ -531,6 +610,15 @@ impl PlatformWindow {
         Ok(())
     }
 
+    pub fn activate(&self) -> PlatformResult<bool> {
+        unsafe {
+            let app = NSApplication::sharedApplication(nil);
+            NSApplication::activateIgnoringOtherApps_(app, YES);
+            NSWindow::makeKeyAndOrderFront_(*self.platform_window, nil);
+        }
+        Ok(true)
+    }
+
     unsafe fn synthetize_mouse_up_event(&self) {
         let last_event = self
             .last_event
@@ -548,23 +636,19 @@ impl PlatformWindow {
 
         if let Some(event) = last_event {
             let opposite = match event.eventType() {
-                NSLeftMouseDown => NSLeftMouseUp,
-                NSRightMouseDown => NSRightMouseUp,
+                NSLeftMouseDown => CGEventType::LeftMouseUp,
+                NSRightMouseDown => CGEventType::RightMouseUp,
                 _ => return,
             };
 
-            let opposite: id = msg_send![class!(NSEvent), mouseEventWithType: opposite
-                location:NSEvent::mouseLocation(*event)
-                modifierFlags:NSEvent::modifierFlags(*event)
-                timestamp:NSEvent::timestamp(*event)
-                windowNumber:NSEvent::windowNumber(*event)
-                context:NSEvent::context(*event)
-                eventNumber:event.eventNumber()
-                clickCount:1
-                pressure:1
-            ];
+            let event = NSEvent::CGEvent(*event) as core_graphics::sys::CGEventRef;
+            let event = CGEventCreateCopy(event);
+            CGEventSetType(event, opposite);
 
-            let () = msg_send![*self.platform_window, sendEvent: opposite];
+            let synthetized: id = msg_send![class!(NSEvent), eventWithCGEvent: event];
+            CFRelease(event as *mut _);
+
+            let () = msg_send![*self.platform_window, sendEvent: synthetized];
         }
     }
 
@@ -613,6 +697,17 @@ impl PlatformWindow {
         });
     }
 
+    pub fn on_layout(&self) {
+        if unsafe { NSWindow::inLiveResize(*self.platform_window) } == YES {
+            if let Some(context) = self.context.get() {
+                // Neither run loop nor main dispatch queue are running during
+                // window resizing; So we poll the run loop manually to keep things
+                // updated.
+                context.run_loop.borrow().platform_run_loop.poll();
+            }
+        }
+    }
+
     pub fn should_send_event(&self, event: StrongPtr) -> bool {
         let event_type = unsafe { NSEvent::eventType(*event) };
         if event_type == NSMouseEntered || event_type == NSMouseExited {
@@ -626,7 +721,93 @@ impl PlatformWindow {
                 return false;
             }
         }
+        self.check_window_dragging(event);
         true
+    }
+
+    // Special handling for dragging window with popup menu open.
+    //
+    // If user drags mouse on window with popup menu open, the LeftMouseDown event
+    // swallowed (used to close the popup menu) and the window start getting
+    // NSLeftMouseDragged events. We try to detect that, and upon getting the second
+    // NSLeftMouseDragged event without prior NSLeftMouseDown, we synthetize the
+    // NSLeftMouseDown event ourself (necessary for flutter view to start getting
+    // mouse drag events). We ignore the first NSLeftMouseDragged event because
+    // that's sometimes posted without a subsequent NSLeftMouseUp event.
+    //
+    // This all is necessary to have custom titlebars draggable while popup menu
+    // is open.
+    fn check_window_dragging(&self, event: StrongPtr) {
+        let event_type = unsafe { NSEvent::eventType(*event) };
+
+        // println!(
+        //     "EVent type {:?} {} {}",
+        //     event_type,
+        //     self.mouse_down.get(),
+        //     self.mouse_dragged.get()
+        // );
+
+        // NSMouseMoved after NSLeftMouseDragged without NSLeftMouseUp
+        if event_type == NSMouseMoved {
+            if self.mouse_down.get() {
+                unsafe {
+                    // println!("Synthetizing up");
+                    self.synthetize_mouse_up_event();
+                }
+            }
+            self.mouse_down.set(false);
+            self.mouse_dragged.set(false);
+        }
+
+        if event_type == NSLeftMouseDown {
+            self.mouse_down.set(true);
+            self.mouse_dragged.set(false);
+        } else if event_type == NSLeftMouseUp {
+            self.mouse_down.set(false);
+            self.mouse_dragged.set(false);
+        } else if event_type == NSLeftMouseDragged
+            && !self.mouse_down.get()
+            && !self.mouse_dragged.get()
+        {
+            // first NSLeftMouseDragged, ignore it because sometimes window
+            // server sends it without subsequent NSLeftMouseUp
+            self.mouse_dragged.set(true);
+        } else if event_type == NSLeftMouseDragged
+            && !self.mouse_down.get()
+            && self.mouse_dragged.get()
+        {
+            // Second NSLeftMouseDragged without prior NSLeftMouseDown; This likely
+            // means user started dragging window while popup menu was opened.
+            // On this case we synthetize LeftMouseDown event at the location
+            // of lastest hitTest in IMContentView. While window server swallows
+            // the mouseDown event, it still generates hitTest at the location
+            // where user pressed the button to possibly initiate regular
+            // window drag.
+            unsafe {
+                let event = NSEvent::CGEvent(*event) as core_graphics::sys::CGEventRef;
+                let event = CGEventCreateCopy(event);
+                CGEventSetType(event, CGEventType::LeftMouseDown);
+                let location: CGPoint = msg_send![
+                    NSWindow::contentView(*self.platform_window),
+                    lastHitTestScreen
+                ];
+                let location_win: CGPoint = msg_send![
+                    NSWindow::contentView(*self.platform_window),
+                    lastHitTestWindow
+                ];
+                CGEventSetLocation(event, location);
+                CGEventSetWindowLocation(event, location_win);
+
+                println!("Synthetizing left mouse down");
+
+                let synthetized: id = msg_send![class!(NSEvent), eventWithCGEvent: event];
+                CFRelease(event as *mut _);
+
+                let () = msg_send![*self.platform_window, sendEvent: synthetized];
+                self.mouse_down.set(true);
+                self.mouse_dragged.set(false);
+            }
+        }
     }
 
     pub fn set_pending_effect(&self, effect: DragEffect) {
@@ -671,7 +852,8 @@ impl PlatformWindow {
             // cocoa eats mouse up on popup menu
             self.synthetize_mouse_up_event();
 
-            let position: NSPoint = request.position.into();
+            let mut position: NSPoint = request.position.into();
+            flip_position(self.platform_window.contentView(), &mut position);
 
             let view = StrongPtr::retain(self.platform_window.contentView());
             let menu = menu.menu.clone();
@@ -700,7 +882,9 @@ impl PlatformWindow {
             //
             // Note there is a special support in MacOS PlatformRunLoop when scheduling tasks
             // run in 0 time to not block the dispatch queue.
-            self.context.run_loop.borrow().schedule_now(cb).detach();
+            if let Some(context) = self.context.get() {
+                context.run_loop.borrow().schedule_now(cb).detach();
+            }
         }
     }
 
@@ -717,11 +901,14 @@ impl PlatformWindow {
     }
 
     pub fn set_window_menu(&self, menu: Option<Rc<PlatformMenu>>) -> PlatformResult<()> {
-        self.context
-            .menu_manager
-            .borrow()
-            .get_platform_menu_manager()
-            .set_menu_for_window(self.platform_window.clone(), menu);
+        if let Some(context) = self.context.get() {
+            context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu_manager()
+                .set_menu_for_window(self.platform_window.clone(), menu);
+        }
         Ok(())
     }
 
@@ -737,13 +924,13 @@ impl PlatformWindow {
 }
 
 struct WindowClass(*const Class);
+// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
+unsafe impl Send for WindowClass {}
 unsafe impl Sync for WindowClass {}
 struct WindowDelegateClass(*const Class);
+// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
+unsafe impl Send for WindowDelegateClass {}
 unsafe impl Sync for WindowDelegateClass {}
-
-extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> BOOL {
-    YES
-}
 
 lazy_static! {
     static ref WINDOW_CLASS: WindowClass = unsafe {
@@ -760,9 +947,17 @@ lazy_static! {
         let mut decl = ClassDecl::new("IMFlutterWindow", window_superclass).unwrap();
 
         decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
+
+        decl.add_method(sel!(layoutIfNeeded), layout_if_needed as extern "C" fn(&mut Object, Sel));
+
         decl.add_method(
             sel!(sendEvent:),
             send_event as extern "C" fn(&mut Object, Sel, id),
+        );
+
+        decl.add_method(
+            sel!(canBecomeKeyWindow),
+            can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
         );
 
         decl.add_method(
@@ -842,11 +1037,14 @@ fn with_state<F>(this: &Object, callback: F)
 where
     F: FnOnce(Rc<PlatformWindow>),
 {
-    let state_ptr = unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("imState");
-        &mut *(state_ptr as *mut Weak<PlatformWindow>)
+    let state = unsafe {
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformWindow
+        };
+        ManuallyDrop::new(Weak::from_raw(state_ptr))
     };
-    let upgraded = state_ptr.upgrade();
+    let upgraded = state.upgrade();
     if let Some(upgraded) = upgraded {
         callback(upgraded);
     }
@@ -857,11 +1055,14 @@ where
     F: FnOnce(Rc<PlatformWindow>) -> R,
     FR: FnOnce() -> R,
 {
-    let state_ptr = unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("imState");
-        &mut *(state_ptr as *mut Weak<PlatformWindow>)
+    let state = unsafe {
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformWindow
+        };
+        ManuallyDrop::new(Weak::from_raw(state_ptr))
     };
-    let upgraded = state_ptr.upgrade();
+    let upgraded = state.upgrade();
     if let Some(upgraded) = upgraded {
         callback(upgraded)
     } else {
@@ -879,6 +1080,14 @@ where
             callback(state, delegate);
         }
     });
+}
+
+// #[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSetType(event: core_graphics::sys::CGEventRef, eventType: CGEventType);
+    fn CGEventSetLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
+    fn CGEventSetWindowLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
+    fn CGEventCreateCopy(event: core_graphics::sys::CGEventRef) -> core_graphics::sys::CGEventRef;
 }
 
 extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
@@ -901,36 +1110,50 @@ extern "C" fn window_will_close(this: &Object, _: Sel, _: id) {
             }
             let () = msg_send![*state.platform_window, setContentViewController: nil];
         }
-        state
-            .context
-            .menu_manager
-            .borrow()
-            .get_platform_menu_manager()
-            .window_will_close(state.platform_window.clone());
+        if let Some(context) = state.context.get() {
+            context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu_manager()
+                .window_will_close(state.platform_window.clone());
+        }
         delegate.will_close();
     });
 }
 
+extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> BOOL {
+    YES
+}
+
 extern "C" fn window_did_become_key(this: &Object, _: Sel, _: id) {
     with_state_delegate(this, |state, _delegate| {
-        state
-            .context
-            .menu_manager
-            .borrow()
-            .get_platform_menu_manager()
-            .window_did_become_active(state.platform_window.clone());
+        if let Some(context) = state.context.get() {
+            context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu_manager()
+                .window_did_become_active(state.platform_window.clone());
+        }
     });
 }
 
-extern "C" fn window_did_resign_key(this: &Object, _: Sel, _: id) {
-    with_state_delegate(this, |state, _delegate| {
-        state
-            .context
-            .menu_manager
-            .borrow()
-            .get_platform_menu_manager()
-            .window_did_resign_active(state.platform_window.clone());
-    });
+extern "C" fn window_did_resign_key(_this: &Object, _: Sel, _: id) {}
+
+extern "C" fn layout_if_needed(this: &mut Object, _sel: Sel) {
+    unsafe {
+        with_state(this, move |state| {
+            state.on_layout();
+        });
+        let superclass = superclass(this);
+        let () = msg_send![super(this, superclass), layoutIfNeeded];
+    }
+}
+
+extern "C" fn can_become_key_window(_this: &Object, _: Sel) -> BOOL {
+    // needed for frameless windows to accept keyboard input.
+    YES
 }
 
 extern "C" fn send_event(this: &mut Object, _: Sel, e: id) {
@@ -1019,12 +1242,12 @@ extern "C" fn dragging_session_ended_at_point(
 }
 
 extern "C" fn dealloc(this: &Object, _sel: Sel) {
-    let state_ptr = unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("imState");
-        &mut *(state_ptr as *mut Weak<PlatformWindow>)
-    };
     unsafe {
-        Box::from_raw(state_ptr);
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformWindow
+        };
+        Weak::from_raw(state_ptr);
 
         let superclass = superclass(this);
         let () = msg_send![super(this, superclass), dealloc];

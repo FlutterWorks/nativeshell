@@ -7,7 +7,7 @@ use std::{
 
 use crate::shell::{
     api_model::{PopupMenuRequest, PopupMenuResponse},
-    Context, IPoint, IRect,
+    Context, IPoint, IRect, MenuHandle,
 };
 
 use super::{
@@ -23,7 +23,7 @@ pub trait WindowMenuDelegate {
 }
 
 pub struct WindowMenu {
-    context: Rc<Context>,
+    context: Context,
     hwnd: HWND,
     child_hwnd: HWND,
     delegate: Option<Weak<dyn WindowMenuDelegate>>,
@@ -59,7 +59,7 @@ thread_local! {
 // Support mouse tracking while popup menu is visible
 impl WindowMenu {
     pub fn new(
-        context: Rc<Context>,
+        context: Context,
         hwnd: HWND,
         child_hwnd: HWND,
         delegate: Weak<dyn WindowMenuDelegate>,
@@ -186,10 +186,12 @@ impl WindowMenu {
         });
 
         if res > 0 {
-            self.context.menu_manager.borrow().on_menu_action(
-                self.current_menu.borrow().as_ref().unwrap().request.handle,
-                res as i64,
-            );
+            if let Some(delegate) = menu.delegate.upgrade() {
+                delegate.borrow().on_menu_action(
+                    self.current_menu.borrow().as_ref().unwrap().request.handle,
+                    res as i64,
+                );
+            }
         }
 
         self.current_menu.borrow_mut().take();
@@ -251,7 +253,7 @@ impl WindowMenu {
             SendMessageW(
                 menu_hwnd,
                 WM_KEYDOWN as u32,
-                WPARAM(VK_DOWN as usize),
+                WPARAM(VK_DOWN.0 as usize),
                 LPARAM(0),
             );
             let mut item_info = MENUITEMINFOW {
@@ -274,13 +276,15 @@ impl WindowMenu {
             menu.menu_hwnd = menu_hwnd;
             if menu.request.preselect_first {
                 let hmenu = menu.platform_menu.menu;
-                self.context
-                    .run_loop
-                    .borrow()
-                    .schedule_now(move || unsafe {
-                        Self::preselect_first_enabled_item(menu_hwnd, hmenu);
-                    })
-                    .detach();
+                if let Some(context) = self.context.get() {
+                    context
+                        .run_loop
+                        .borrow()
+                        .schedule_now(move || unsafe {
+                            Self::preselect_first_enabled_item(menu_hwnd, hmenu);
+                        })
+                        .detach();
+                }
             }
         }
     }
@@ -355,20 +359,20 @@ impl WindowMenu {
             let key = msg.wParam.0 as u32;
 
             let (key_prev, key_next) = match self.delegate().get_state().is_rtl() {
-                true => (VK_RIGHT, VK_LEFT),
-                false => (VK_LEFT, VK_RIGHT),
+                true => (VK_RIGHT.0 as u32, VK_LEFT.0 as u32),
+                false => (VK_LEFT.0 as u32, VK_RIGHT.0 as u32),
             };
 
-            if key == key_prev && current_menu.current_item_is_first {
-                self.context
-                    .menu_manager
-                    .borrow()
-                    .move_to_previous_menu(current_menu.platform_menu.handle);
-            } else if key == key_next && current_menu.current_item_is_last {
-                self.context
-                    .menu_manager
-                    .borrow()
-                    .move_to_next_menu(current_menu.platform_menu.handle);
+            if let Some(delegate) = current_menu.platform_menu.delegate.upgrade() {
+                if key == key_prev && current_menu.current_item_is_first {
+                    delegate
+                        .borrow()
+                        .move_to_previous_menu(current_menu.platform_menu.handle);
+                } else if key == key_next && current_menu.current_item_is_last {
+                    delegate
+                        .borrow()
+                        .move_to_next_menu(current_menu.platform_menu.handle);
+                }
             }
         }
     }
@@ -386,25 +390,27 @@ impl WindowMenu {
 
     unsafe fn track_mouse_leave(&self) {
         let hwnd = self.child_hwnd;
-        self.context
-            .run_loop
-            .borrow()
-            .schedule(
-                // this needs to be delayed a bit, if we schedule it immediately after
-                // hiding popup menu windows will fire WM_MOUSELEAVE even if cursor
-                // is within child_hwnd.
-                Duration::from_millis(50),
-                move || {
-                    let mut event = TRACKMOUSEEVENT {
-                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    TrackMouseEvent(&mut event as *mut _);
-                },
-            )
-            .detach();
+        if let Some(context) = self.context.get() {
+            context
+                .run_loop
+                .borrow()
+                .schedule(
+                    // this needs to be delayed a bit, if we schedule it immediately after
+                    // hiding popup menu windows will fire WM_MOUSELEAVE even if cursor
+                    // is within child_hwnd.
+                    Duration::from_millis(50),
+                    move || {
+                        let mut event = TRACKMOUSEEVENT {
+                            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        TrackMouseEvent(&mut event as *mut _);
+                    },
+                )
+                .detach();
+        }
     }
 
     pub fn on_menu_select(&self, _msg: u32, w_param: WPARAM, l_param: LPARAM) {
@@ -425,6 +431,30 @@ impl WindowMenu {
             flags & MF_POPUP.0 == 0 || flags & MF_MOUSESELECT.0 == MF_MOUSESELECT.0;
     }
 
+    fn on_init_menu(&self, menu: HMENU) {
+        if self.current_menu.borrow().is_none() {
+            return;
+        }
+
+        let mut info = MENUINFO {
+            cbSize: std::mem::size_of::<MENUINFO>() as u32,
+            fMask: MIM_MENUDATA,
+            ..Default::default()
+        };
+        unsafe {
+            if !GetMenuInfo(menu, &mut info as *mut _).as_bool() {
+                return;
+            }
+        }
+
+        let current_menu = Ref::map(self.current_menu.borrow(), |x| x.as_ref().unwrap());
+
+        let handle = MenuHandle(info.dwMenuData as i64);
+        if let Some(delegate) = current_menu.platform_menu.delegate.upgrade() {
+            delegate.borrow().on_menu_open(handle);
+        }
+    }
+
     pub fn handle_message(
         &self,
         _h_wnd: HWND,
@@ -433,6 +463,9 @@ impl WindowMenu {
         l_param: LPARAM,
     ) -> Option<LRESULT> {
         match msg {
+            WM_INITMENUPOPUP => {
+                self.on_init_menu(HMENU(w_param.0 as isize));
+            }
             WM_MENUSELECT => {
                 self.on_menu_select(msg, w_param, l_param);
             }

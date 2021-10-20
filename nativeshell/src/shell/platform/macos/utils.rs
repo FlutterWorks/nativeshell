@@ -1,25 +1,24 @@
-use std::{ffi::CString, mem::ManuallyDrop, os::raw::c_char, slice, sync::Arc};
-
+use crate::shell::{api_model::ImageData, Point, Rect, Size};
 use cocoa::{
-    appkit::{CGFloat, NSImage},
+    appkit::{NSImage, NSView},
     base::{id, nil},
     foundation::{NSArray, NSPoint, NSRect, NSSize, NSString},
 };
-
 use core_graphics::{
     base::{kCGBitmapByteOrderDefault, kCGImageAlphaLast, kCGRenderingIntentDefault},
     color_space::CGColorSpace,
     data_provider::CGDataProvider,
     image::CGImage,
 };
-
 use objc::{
+    class,
     declare::ClassDecl,
+    msg_send,
     rc::StrongPtr,
     runtime::{objc_getClass, Class, Object},
+    sel, sel_impl,
 };
-
-use crate::shell::{api_model::ImageData, Point, Rect, Size};
+use std::{ffi::CString, mem::ManuallyDrop, os::raw::c_char, slice, sync::Arc};
 
 impl<'a> From<&'a Size> for NSSize {
     fn from(size: &'a Size) -> Self {
@@ -130,29 +129,32 @@ pub unsafe fn array_with_objects(objects: &[StrongPtr]) -> id {
     NSArray::arrayWithObjects(nil, &vec)
 }
 
-pub fn ns_image_from(image: ImageData) -> StrongPtr {
+pub fn ns_image_from(images: Vec<ImageData>) -> StrongPtr {
     unsafe {
-        let data = CGDataProvider::from_buffer(Arc::new(image.data));
+        let res = StrongPtr::new(msg_send![NSImage::alloc(nil), init]);
+        for image in images {
+            let data = CGDataProvider::from_buffer(Arc::new(image.data));
 
-        let rgb = CGColorSpace::create_device_rgb();
+            let rgb = CGColorSpace::create_device_rgb();
 
-        let cgimage = CGImage::new(
-            image.width as usize,
-            image.height as usize,
-            8,
-            32,
-            image.bytes_per_row as usize,
-            &rgb,
-            kCGBitmapByteOrderDefault | kCGImageAlphaLast,
-            &data,
-            true,
-            kCGRenderingIntentDefault,
-        );
+            let cgimage = CGImage::new(
+                image.width as usize,
+                image.height as usize,
+                8,
+                32,
+                image.bytes_per_row as usize,
+                &rgb,
+                kCGBitmapByteOrderDefault | kCGImageAlphaLast,
+                &data,
+                true,
+                kCGRenderingIntentDefault,
+            );
 
-        StrongPtr::new(msg_send![NSImage::alloc(nil),
-            initWithCGImage:&*cgimage
-            size:NSSize::new(image.width as CGFloat, image.height as CGFloat)
-        ])
+            let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+            let rep = StrongPtr::new(msg_send![rep, initWithCGImage:&*cgimage]);
+            NSImage::addRepresentation_(*res, *rep);
+        }
+        res
     }
 }
 
@@ -167,4 +169,24 @@ pub(super) fn class_decl_from_name(name: &str) -> ManuallyDrop<ClassDecl> {
     // bit dirty, unfortunatelly ClassDecl doesn't let us create instance with custom
     // class, and it's now worth replicating the entire functionality here
     ManuallyDrop::new(unsafe { std::mem::transmute(res) })
+}
+
+pub(super) fn class_from_string(name: &str) -> *mut Class {
+    let name = CString::new(name).unwrap();
+    unsafe { objc_getClass(name.as_ptr() as *const _) as *mut _ }
+}
+
+pub(super) fn flip_position(view: id, position: &mut NSPoint) {
+    let flipped: bool = unsafe { msg_send![view, isFlipped] };
+    if !flipped {
+        position.y = unsafe { NSView::bounds(view) }.size.height - position.y;
+    }
+}
+
+pub(super) fn flip_rect(view: id, rect: &mut NSRect) {
+    let flipped: bool = unsafe { msg_send![view, isFlipped] };
+    if !flipped {
+        rect.origin.y =
+            unsafe { NSView::bounds(view) }.size.height - rect.size.height - rect.origin.y;
+    }
 }

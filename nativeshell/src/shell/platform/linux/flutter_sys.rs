@@ -1,7 +1,4 @@
-extern crate gobject_sys;
-extern crate gtk_sys;
-
-use std::os::raw::c_char;
+use std::os::raw::{c_char, c_void};
 
 use gobject_sys::{GObject, GObjectClass};
 use gtk_sys::{GtkContainer, GtkContainerClass, GtkWidget};
@@ -76,9 +73,19 @@ pub type FlBinaryMessengerMessageHandler = Option<
     ),
 >;
 
+#[cfg(test)]
 extern "C" {
     pub fn fl_dart_project_new() -> *mut GObject;
+}
 
+// Only link flutter_linux_gtk when not building for tests
+#[cfg(not(test))]
+#[link(name = "flutter_linux_gtk")]
+extern "C" {
+    pub fn fl_dart_project_new() -> *mut GObject;
+}
+
+extern "C" {
     pub fn fl_view_new(project: *mut FlDartProject) -> *mut GtkWidget;
     pub fn fl_view_get_engine(view: *mut FlView) -> *mut GObject;
 
@@ -113,4 +120,9 @@ extern "C" {
         result: *mut gio_sys::GAsyncResult,
         error: *mut *mut glib_sys::GError,
     ) -> *mut glib_sys::GBytes;
+
+    pub fn fl_plugin_registry_get_registrar_for_plugin(
+        registry: *mut FlView,
+        name: *const c_char,
+    ) -> *mut c_void;
 }

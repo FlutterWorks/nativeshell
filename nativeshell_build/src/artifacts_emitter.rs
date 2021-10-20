@@ -1,21 +1,21 @@
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    util::{mkdir, symlink},
+    util::{copy, copy_to, mkdir},
     BuildError, BuildResult, FileOperation, Flutter, IOResultExt,
 };
 
-pub(super) struct ArtifactEmitter<'a> {
-    build: &'a Flutter,
+pub(super) struct ArtifactsEmitter<'a> {
+    build: &'a Flutter<'a>,
     flutter_out_dir: PathBuf,
     flutter_build_dir: PathBuf,
     artifacts_out_dir: PathBuf,
 }
 
-impl<'a> ArtifactEmitter<'a> {
+impl<'a> ArtifactsEmitter<'a> {
     pub fn new<P: AsRef<Path>>(
         build: &'a Flutter,
         flutter_out_dir: P,
@@ -34,7 +34,7 @@ impl<'a> ArtifactEmitter<'a> {
         let data_dir = self.artifacts_out_dir.join("data");
         if data_dir.exists() {
             std::fs::remove_dir_all(&data_dir)
-                .unwrap_or_else(|_| panic!("Failed to remove {:?}", data_dir));
+                .wrap_error(FileOperation::RemoveDir, || data_dir.clone())?;
         }
         let assets_dst_dir = mkdir(&data_dir, Some("flutter_assets"))?;
         let assets_src_dir = {
@@ -51,38 +51,36 @@ impl<'a> ArtifactEmitter<'a> {
             .wrap_error(FileOperation::ReadDir, || assets_src_dir.clone())?
         {
             let entry = entry.wrap_error(FileOperation::Read, || assets_src_dir.clone())?;
-            Self::copy_to(entry.path(), &assets_dst_dir, false)?
+            copy_to(entry.path(), &assets_dst_dir, false)?
         }
 
-        let app_dill = self.flutter_build_dir.join("app.dill");
-        if app_dill.exists() {
-            Self::copy(
-                self.flutter_build_dir.join("app.dill"),
-                assets_dst_dir.join("kernel_blob.bin"),
-                false,
-            )?;
+        if self.build.build_mode == "debug" {
+            let app_dill = self.flutter_build_dir.join("app.dill");
+            if app_dill.exists() {
+                copy(
+                    self.flutter_build_dir.join("app.dill"),
+                    assets_dst_dir.join("kernel_blob.bin"),
+                    false,
+                )?;
+            }
         }
 
         // windows AOT
         if cfg!(target_os = "windows") {
             let app_so = self.flutter_out_dir.join("windows").join("app.so");
             if app_so.exists() {
-                Self::copy_to(&app_so, &data_dir, false)?;
+                copy_to(&app_so, &data_dir, false)?;
             }
         }
 
         // linux AOT
         if cfg!(target_os = "linux") {
-            // on linux the lib path is hardcoded :-/
+            // on linux the lib path is hardcoded, but all libraries go to "lib"
+            // (RUNPATH being $ORIGIN/lib)
             let app_so = self.flutter_out_dir.join("lib").join("libapp.so");
             if app_so.exists() {
-                let lib_dir = self.artifacts_out_dir.join("lib");
-                if lib_dir.exists() {
-                    std::fs::remove_dir_all(&lib_dir)
-                        .unwrap_or_else(|_| panic!("Failed to remove {:?}", lib_dir));
-                }
-                mkdir(&lib_dir, None::<PathBuf>)?;
-                Self::copy_to(&app_so, &lib_dir, false)?;
+                let lib_dir = mkdir(&self.artifacts_out_dir, Some("lib"))?;
+                copy_to(&app_so, &lib_dir, false)?;
             }
         }
 
@@ -91,7 +89,7 @@ impl<'a> ArtifactEmitter<'a> {
 
     // MacOS only
     pub fn emit_app_framework(&self) -> BuildResult<()> {
-        Self::copy_to(
+        copy_to(
             &self.flutter_out_dir.join("App.framework"),
             &self.artifacts_out_dir,
             true,
@@ -115,25 +113,42 @@ impl<'a> ArtifactEmitter<'a> {
                 panic!("Invalid target OS")
             }
         };
+
+        let artifacts_out_dir = {
+            if cfg!(target_os = "linux") {
+                // RUNPATH is set to $origin/lib
+                mkdir(&self.artifacts_out_dir, Some("lib"))?
+            } else {
+                self.artifacts_out_dir.clone()
+            }
+        };
+
         let deps_out_dir = self.artifacts_out_dir.join("deps");
         let flutter_artifacts = self.find_artifacts_location(self.build.build_mode.as_str())?;
         let flutter_artifacts_debug = self.find_artifacts_location("debug")?;
         for file in files {
-            let src = flutter_artifacts.join(file);
+            // on linux the unstripped libraries in local engien build are in
+            // lib.unstripped folder; so if unstripped version exists we prefer that
+            let unstripped = flutter_artifacts.join("lib.unstripped").join(file);
+            let src = if unstripped.exists() {
+                unstripped
+            } else {
+                flutter_artifacts.join(file)
+            };
             if !src.exists() {
                 return Err(BuildError::OtherError(format!(
                     "File {:?} does not exist. Try running 'flutter precache'.",
                     src
                 )));
             }
-            Self::copy_to(&src, &self.artifacts_out_dir, true)?;
-            Self::copy_to(&src, &deps_out_dir, true)?;
+            copy_to(&src, &artifacts_out_dir, true)?;
+            copy_to(&src, &deps_out_dir, true)?;
         }
 
         let data_dir = self.artifacts_out_dir.join("data");
         let icu = flutter_artifacts_debug.join("icudtl.dat");
         if icu.exists() && data_dir.exists() {
-            Self::copy_to(icu, data_dir, false)?;
+            copy_to(icu, data_dir, false)?;
         }
         Ok(())
     }
@@ -155,11 +170,8 @@ impl<'a> ArtifactEmitter<'a> {
                 self.artifacts_out_dir.to_string_lossy(),
             };
         } else if cfg!(target_os = "linux") {
-            cargo_emit::rustc_link_lib! {
-                "flutter_linux_gtk",
-            };
             cargo_emit::rustc_link_search! {
-                self.artifacts_out_dir.to_string_lossy(),
+                self.artifacts_out_dir.join("lib").to_string_lossy(),
             };
         }
 
@@ -187,105 +199,21 @@ impl<'a> ArtifactEmitter<'a> {
         }
     }
 
-    fn copy<P, Q>(src: P, dst: Q, allow_symlinks: bool) -> BuildResult<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        if dst.as_ref().exists() {
-            fs::remove_file(dst.as_ref())
-                .wrap_error(FileOperation::Remove, || dst.as_ref().into())?;
-        }
-        Self::copy_item(src, dst, allow_symlinks)
+    fn find_flutter_bundled_artifacts_location(&self) -> BuildResult<PathBuf> {
+        Ok(self
+            .build
+            .options
+            .find_flutter_bin()?
+            .join("cache")
+            .join("artifacts")
+            .join("engine"))
     }
 
-    fn copy_to<P, Q>(src: P, dst: Q, allow_symlinks: bool) -> BuildResult<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        let file_name = src.as_ref().file_name().unwrap();
-        Self::copy(&src, dst.as_ref().join(file_name), allow_symlinks)
-    }
-
-    fn copy_item<P, Q>(src: P, dst: Q, allow_symlinks: bool) -> BuildResult<()>
-    where
-        P: AsRef<Path>,
-        Q: AsRef<Path>,
-    {
-        let src_meta = fs::metadata(src.as_ref())
-            .wrap_error(crate::FileOperation::MetaData, || src.as_ref().into())?;
-
-        if !allow_symlinks {
-            if src_meta.is_dir() {
-                copy_dir::copy_dir(&src, &dst).wrap_error_with_src(
-                    FileOperation::CopyDir,
-                    || dst.as_ref().into(),
-                    || src.as_ref().into(),
-                )?;
-            } else {
-                fs::copy(&src, &dst).wrap_error_with_src(
-                    FileOperation::Copy,
-                    || dst.as_ref().into(),
-                    || src.as_ref().into(),
-                )?;
-            }
-        } else {
-            symlink(src, dst)?
-        }
-
-        Ok(())
-    }
-
-    fn find_executable<P: AsRef<Path>>(exe_name: P) -> Option<PathBuf> {
-        env::var_os("PATH").and_then(|paths| {
-            env::split_paths(&paths)
-                .filter_map(|dir| {
-                    let full_path = dir.join(&exe_name);
-                    if full_path.is_file() {
-                        Some(full_path)
-                    } else {
-                        None
-                    }
-                })
-                .next()
-        })
-    }
-
-    fn find_flutter_bin() -> Option<PathBuf> {
-        let executable = if cfg!(target_os = "windows") {
-            "flutter.bat"
-        } else {
-            "flutter"
-        };
-        let exe_path = Self::find_executable(executable);
-        exe_path.and_then(|p| p.parent().map(Path::to_owned))
-    }
-
-    fn find_flutter_bundled_artifacts_location() -> Option<PathBuf> {
-        Self::find_flutter_bin().map(|p| p.join("cache").join("artifacts").join("engine"))
-    }
-
-    fn find_local_engine_src_path() -> Option<PathBuf> {
-        Self::find_flutter_bin()
-            .and_then(|p| {
-                p.parent()
-                    .map(Path::to_owned)
-                    .and_then(|p| p.parent().map(Path::to_owned))
-            })
-            .map(|p| p.join("engine").join("src"))
-    }
-
-    fn find_artifacts_location(&self, build_mode: &str) -> BuildResult<PathBuf> {
-        let path: Option<PathBuf> = match self.build.options.local_engine.as_ref() {
+    pub(super) fn find_artifacts_location(&self, build_mode: &str) -> BuildResult<PathBuf> {
+        let path = match self.build.options.local_engine.as_ref() {
             Some(local_engine) => {
-                let engine_src_path = self
-                    .build
-                    .options
-                    .local_engine_src_path
-                    .clone()
-                    .or_else(Self::find_local_engine_src_path);
-                engine_src_path.map(|p| p.join("out").join(local_engine))
+                let engine_src_path = self.build.options.local_engine_src_path()?;
+                engine_src_path.join("out").join(local_engine)
             }
             None => {
                 let platform = match self.build.target_platform.as_str() {
@@ -303,12 +231,9 @@ impl<'a> ArtifactEmitter<'a> {
                     (platform, "debug") => platform.into(),
                     (platform, mode) => format!("{}-{}", platform, mode),
                 };
-                Self::find_flutter_bundled_artifacts_location().map(|p| p.join(engine))
+                self.find_flutter_bundled_artifacts_location()?.join(engine)
             }
         };
-
-        let path = path.ok_or_else(|| BuildError::OtherError(
-            "Coud not determine flutter artifacts location; Please make sure that flutter is in PATH".into()))?;
 
         if !path.exists() {
             Err(BuildError::OtherError(format!(

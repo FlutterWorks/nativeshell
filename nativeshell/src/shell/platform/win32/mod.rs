@@ -1,3 +1,4 @@
+pub mod app_delegate;
 pub mod binary_messenger;
 pub mod display;
 pub mod dpi;
@@ -9,8 +10,9 @@ pub mod dxgi_hook;
 pub mod engine;
 pub mod error;
 pub mod flutter_sys;
+pub mod hot_key;
 pub mod init;
-pub mod key_event;
+pub mod keyboard_map;
 pub mod menu;
 pub mod run_loop;
 pub mod util;
@@ -27,15 +29,16 @@ mod bindings {
 // This bit of a lie, it doesn't have dxgi
 mod all_bindings {
     pub use super::bindings::Windows::Win32::{
+        Foundation::*,
         Graphics::{Dwm::*, Gdi::*},
         Storage::StructuredStorage::*,
         System::{
-            Com::*, DataExchange::*, Diagnostics::Debug::*, Memory::*, SystemServices::*,
-            Threading::*,
+            Com::*, DataExchange::*, Diagnostics::Debug::*, LibraryLoader::*, Memory::*,
+            SystemServices::*, Threading::*,
         },
         UI::{
-            Controls::*, DisplayDevices::*, KeyboardAndMouseInput::*, MenusAndResources::*,
-            Shell::*, WindowsAndMessaging::*,
+            Controls::*, KeyboardAndMouseInput::*, Shell::*, TextServices::*,
+            WindowsAndMessaging::*,
         },
     };
     pub use windows::*;

@@ -1,29 +1,29 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::codec::{
-    MessageChannel, MessageReply, MessageSender, MethodCall, MethodCallReply, MethodChannel,
-    MethodInvoker, StandardMethodCodec, Value,
+    EngineMethodChannel, EventSender, MessageChannel, MessageReply, MessageSender, MethodCall,
+    MethodCallReply, MethodInvoker, StandardMethodCodec, Value,
 };
 
-use super::{Context, EngineHandle, EngineManager};
+use super::{Context, ContextRef, EngineHandle, EngineManager};
 
 type MessageCallback = dyn Fn(Value, MessageReply<Value>, EngineHandle);
 type MethodCallback = dyn Fn(MethodCall<Value>, MethodCallReply<Value>, EngineHandle);
 
 pub struct MessageManager {
-    context: Rc<Context>,
+    context: Context,
 
     message_channels: HashMap<EngineHandle, HashMap<String, MessageChannel<Value>>>,
     message_handlers: Rc<RefCell<HashMap<String, Box<MessageCallback>>>>,
 
-    method_channels: HashMap<EngineHandle, HashMap<String, MethodChannel<Value>>>,
+    method_channels: HashMap<EngineHandle, HashMap<String, EngineMethodChannel<Value>>>,
     method_handlers: Rc<RefCell<HashMap<String, Box<MethodCallback>>>>,
 }
 
 impl MessageManager {
-    pub(super) fn new(context: Rc<Context>) -> Self {
+    pub(super) fn new(context: &ContextRef) -> Self {
         Self {
-            context,
+            context: context.weak(),
             message_channels: HashMap::new(),
             message_handlers: Rc::new(RefCell::new(HashMap::new())),
             method_channels: HashMap::new(),
@@ -35,45 +35,47 @@ impl MessageManager {
     where
         F: Fn(Value, MessageReply<Value>, EngineHandle) + 'static,
     {
-        let context = self.context.clone();
-        if !self
-            .message_handlers
-            .as_ref()
-            .borrow()
-            .contains_key(channel)
-        {
-            // register handlers on engines
-            let manager = context.engine_manager.borrow();
-            let engines = manager.get_all_engines();
-            for engine in engines {
-                self.register_message_channel_for_engine(&manager, engine, channel);
+        if let Some(context) = self.context.get() {
+            if !self
+                .message_handlers
+                .as_ref()
+                .borrow()
+                .contains_key(channel)
+            {
+                // register handlers on engines
+                let manager = context.engine_manager.borrow();
+                let engines = manager.get_all_engines();
+                for engine in engines {
+                    self.register_message_channel_for_engine(&manager, engine, channel);
+                }
             }
-        }
 
-        self.message_handlers
-            .as_ref()
-            .borrow_mut()
-            .insert(channel.into(), Box::new(callback));
+            self.message_handlers
+                .as_ref()
+                .borrow_mut()
+                .insert(channel.into(), Box::new(callback));
+        }
     }
 
     pub fn register_method_handler<F>(&mut self, channel: &str, callback: F)
     where
         F: Fn(MethodCall<Value>, MethodCallReply<Value>, EngineHandle) + 'static,
     {
-        let context = self.context.clone();
-        if !self.method_handlers.as_ref().borrow().contains_key(channel) {
-            // register handlers on engines
-            let manager = context.engine_manager.borrow();
-            let engines = manager.get_all_engines();
-            for engine in engines {
-                self.register_method_channel_for_engine(&manager, engine, channel);
+        if let Some(context) = self.context.get() {
+            if !self.method_handlers.as_ref().borrow().contains_key(channel) {
+                // register handlers on engines
+                let manager = context.engine_manager.borrow();
+                let engines = manager.get_all_engines();
+                for engine in engines {
+                    self.register_method_channel_for_engine(&manager, engine, channel);
+                }
             }
-        }
 
-        self.method_handlers
-            .as_ref()
-            .borrow_mut()
-            .insert(channel.into(), Box::new(callback));
+            self.method_handlers
+                .as_ref()
+                .borrow_mut()
+                .insert(channel.into(), Box::new(callback));
+        }
     }
 
     pub fn unregister_message_handler(&mut self, channel: &str) {
@@ -92,26 +94,31 @@ impl MessageManager {
         }
     }
 
-    pub fn get_message_sender(
-        &self,
-        engine: EngineHandle,
-        channel: &str,
-    ) -> Option<MessageSender<Value>> {
-        self.message_channels
-            .get(&engine)
-            .and_then(|e| e.get(channel))
-            .map(|e| e.sender().clone())
+    pub fn get_message_sender(&self, engine: EngineHandle, channel: &str) -> MessageSender<Value> {
+        MessageSender::new(
+            self.context.clone(),
+            engine,
+            channel.into(),
+            &StandardMethodCodec,
+        )
     }
 
-    pub fn get_method_invoker(
-        &self,
-        engine: EngineHandle,
-        channel: &str,
-    ) -> Option<MethodInvoker<Value>> {
-        self.method_channels
-            .get(&engine)
-            .and_then(|e| e.get(channel))
-            .map(|e| e.invoker().clone())
+    pub fn get_event_sender(&self, engine: EngineHandle, channel: &str) -> EventSender<Value> {
+        EventSender::new(
+            self.context.clone(),
+            engine,
+            channel.into(),
+            &StandardMethodCodec,
+        )
+    }
+
+    pub fn get_method_invoker(&self, engine: EngineHandle, channel: &str) -> MethodInvoker<Value> {
+        MethodInvoker::new(
+            self.context.clone(),
+            engine,
+            channel.into(),
+            &StandardMethodCodec,
+        )
     }
 
     pub(super) fn engine_created(&mut self, engine_manager: &EngineManager, engine: EngineHandle) {
@@ -196,7 +203,7 @@ impl MessageManager {
     ) {
         let channel_str = String::from(channel);
         let handlers = self.method_handlers.clone();
-        let method_channel = MethodChannel::new_with_engine_manager(
+        let method_channel = EngineMethodChannel::new_with_engine_manager(
             self.context.clone(),
             engine,
             channel,

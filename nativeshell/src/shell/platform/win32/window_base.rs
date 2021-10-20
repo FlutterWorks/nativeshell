@@ -1,5 +1,6 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
+    mem,
     rc::{Rc, Weak},
 };
 
@@ -8,6 +9,7 @@ use crate::{
         api_model::{
             WindowFrame, WindowGeometry, WindowGeometryFlags, WindowGeometryRequest, WindowStyle,
         },
+        platform::error::PlatformError,
         IPoint, IRect, ISize, Point, Rect, Size,
     },
     util::OkLog,
@@ -18,7 +20,7 @@ use super::{
     display::Displays,
     error::PlatformResult,
     flutter_sys::{FlutterDesktopGetDpiForHWND, FlutterDesktopGetDpiForMonitor},
-    util::{clamp, BoolResultExt, HRESULTExt, GET_X_LPARAM, GET_Y_LPARAM},
+    util::{as_u8_slice, clamp, BoolResultExt, GET_X_LPARAM, GET_Y_LPARAM},
 };
 
 pub struct WindowBaseState {
@@ -29,6 +31,8 @@ pub struct WindowBaseState {
     max_content_size: RefCell<Size>,
     delegate: Weak<dyn WindowDelegate>,
     style: RefCell<WindowStyle>,
+    pending_show_cmd: Cell<SHOW_WINDOW_CMD>,
+    last_window_pos: RefCell<Option<WINDOWPOS>>,
 }
 
 const LARGE_SIZE: f64 = 64.0 * 1024.0;
@@ -43,6 +47,8 @@ impl WindowBaseState {
             min_content_size: RefCell::new(Size::wh(0.0, 0.0)),
             max_content_size: RefCell::new(Size::wh(LARGE_SIZE, LARGE_SIZE)),
             style: Default::default(),
+            pending_show_cmd: Cell::new(SW_SHOW),
+            last_window_pos: RefCell::new(None),
         }
     }
 
@@ -50,15 +56,24 @@ impl WindowBaseState {
         unsafe { ShowWindow(self.hwnd, SW_HIDE).as_platform_result() }
     }
 
+    pub fn activate(&self) -> PlatformResult<bool> {
+        unsafe { Ok(SetForegroundWindow(self.hwnd).into()) }
+    }
+
     pub fn show<F>(&self, callback: F) -> PlatformResult<()>
     where
         F: FnOnce() + 'static,
     {
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOW); // false is not an error
+            ShowWindow(self.hwnd, self.pending_show_cmd.get()); // false is not an error
         }
+        self.pending_show_cmd.set(SW_SHOW);
         callback();
         Ok(())
+    }
+
+    pub fn is_visible(&self) -> PlatformResult<bool> {
+        unsafe { Ok(IsWindowVisible(self.hwnd).into()) }
     }
 
     pub fn set_geometry(
@@ -238,7 +253,7 @@ impl WindowBaseState {
             SendMessageW(
                 self.hwnd,
                 WM_NCCALCSIZE as u32,
-                WPARAM(FALSE.0 as usize),
+                WPARAM(0),
                 LPARAM(&rect as *const _ as isize),
             );
         }
@@ -305,7 +320,7 @@ impl WindowBaseState {
     }
 
     pub fn global_to_local(&self, offset: &IPoint) -> Point {
-        let local: Point = self.global_to_local_physical(&offset).into();
+        let local: Point = self.global_to_local_physical(offset).into();
         local.scaled(1.0 / self.get_scaling_factor())
     }
 
@@ -378,7 +393,7 @@ impl WindowBaseState {
             cyBottomHeight: 0,
         };
         unsafe {
-            DwmExtendFrameIntoClientArea(self.hwnd, &margins as *const _).as_platform_result()
+            DwmExtendFrameIntoClientArea(self.hwnd, &margins as *const _).map_err(|e| e.into())
         }
     }
 
@@ -438,6 +453,49 @@ impl WindowBaseState {
 
             self.update_dwm_frame()?;
         }
+        Ok(())
+    }
+
+    pub fn save_position_to_string(&self) -> PlatformResult<String> {
+        unsafe {
+            let mut placement = WINDOWPLACEMENT {
+                length: mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            if GetWindowPlacement(self.hwnd, &mut placement as *mut _).as_bool() {
+                let buffer = as_u8_slice(&placement);
+                Ok(base64::encode(buffer))
+            } else {
+                Ok(String::new())
+            }
+        }
+    }
+
+    pub fn restore_position_from_string(&self, position: String) -> PlatformResult<()> {
+        let buffer = base64::decode(&position).map_err(|e| PlatformError::OtherError {
+            error: format!("{}", e),
+        })?;
+        if buffer.len() != mem::size_of::<WINDOWPLACEMENT>() {
+            return Err(PlatformError::OtherError {
+                error: "Invalid placement string".into(),
+            });
+        }
+        let placement = buffer.as_ptr() as *mut WINDOWPLACEMENT;
+        unsafe {
+            let placement = &mut *placement;
+            if placement.length != mem::size_of::<WINDOWPLACEMENT>() as u32 {
+                return Err(PlatformError::OtherError {
+                    error: "Invalid placement string".into(),
+                });
+            }
+            if !self.is_visible()? {
+                self.pending_show_cmd.set(placement.showCmd);
+
+                placement.showCmd = SW_HIDE;
+            }
+            SetWindowPlacement(self.hwnd, placement as *const _);
+        }
+
         Ok(())
     }
 
@@ -516,7 +574,24 @@ impl WindowBaseState {
             }
             WM_WINDOWPOSCHANGING => {
                 let position = unsafe { &mut *(l_param.0 as *mut WINDOWPOS) };
+                let pos_before = *position;
                 self.adjust_window_position(position).ok_log();
+
+                if let Some(ref prev_window_pos) = *self.last_window_pos.borrow() {
+                    if pos_before.cx < position.cx {
+                        // fix window drift when resizing left border past minimum size
+                        if position.x != prev_window_pos.x {
+                            position.x = prev_window_pos.x + prev_window_pos.cx - position.cx;
+                        }
+                    }
+                    if pos_before.cy < position.cy {
+                        // fix window drift when resizing top border past minimum size
+                        if position.y != prev_window_pos.y {
+                            position.y = prev_window_pos.y + prev_window_pos.cy - position.cy;
+                        }
+                    }
+                }
+                self.last_window_pos.borrow_mut().replace(*position);
                 None
             }
             WM_DWMCOMPOSITIONCHANGED => {

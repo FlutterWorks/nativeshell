@@ -33,7 +33,7 @@ use super::{
 pub type PlatformWindowType = isize; // HWND
 
 pub struct PlatformWindow {
-    context: Rc<Context>,
+    context: Context,
     hwnd: Cell<HWND>,
     child_hwnd: Cell<HWND>,
     state: LateRefCell<WindowBaseState>,
@@ -57,7 +57,7 @@ struct MouseState {
 
 impl PlatformWindow {
     pub fn new(
-        context: Rc<Context>,
+        context: Context,
         delegate: Weak<dyn PlatformWindowDelegate>,
         parent: Option<Rc<PlatformWindow>>,
     ) -> Self {
@@ -118,7 +118,7 @@ impl PlatformWindow {
             set_override_parent_hwnd(win);
 
             self.flutter_controller
-                .set(FlutterDesktopViewControllerCreate(100, 100, engine.handle));
+                .set(FlutterDesktopViewControllerCreate(1, 1, engine.handle));
 
             let view = FlutterDesktopViewControllerGetView(*self.flutter_controller.borrow());
             self.child_hwnd.set(FlutterDesktopViewGetHWND(view));
@@ -144,9 +144,11 @@ impl PlatformWindow {
             weak.clone(),
         ));
 
-        let drag_context = Rc::new(DragContext::new(self.context.clone(), weak));
-        self.drag_context.set(drag_context.clone());
-        drag_context.assign_weak_self(Rc::downgrade(&drag_context));
+        if let Some(context) = self.context.get() {
+            let drag_context = Rc::new(DragContext::new(&context, weak));
+            self.drag_context.set(drag_context.clone());
+            drag_context.assign_weak_self(Rc::downgrade(&drag_context));
+        }
     }
 }
 
@@ -238,6 +240,10 @@ impl PlatformWindow {
         Ok(())
     }
 
+    pub fn activate(&self) -> PlatformResult<bool> {
+        self.state.borrow().activate()
+    }
+
     pub fn ready_to_show(&self) -> PlatformResult<()> {
         self.ready_to_show.set(true);
         if self.show_when_ready.get() {
@@ -286,6 +292,14 @@ impl PlatformWindow {
         self.state.borrow().set_title(title)
     }
 
+    pub fn save_position_to_string(&self) -> PlatformResult<String> {
+        self.state.borrow().save_position_to_string()
+    }
+
+    pub fn restore_position_from_string(&self, position: String) -> PlatformResult<()> {
+        self.state.borrow().restore_position_from_string(position)
+    }
+
     pub fn set_style(&self, style: WindowStyle) -> PlatformResult<()> {
         self.state.borrow().set_style(style)?;
         self.force_redraw();
@@ -297,7 +311,7 @@ impl PlatformWindow {
     }
 
     pub fn is_enabled(&self) -> bool {
-        unsafe { IsWindowEnabled(self.hwnd()) == TRUE }
+        unsafe { IsWindowEnabled(self.hwnd()).as_bool() }
     }
 
     pub fn show_modal<F>(&self, done_callback: F)
@@ -345,16 +359,18 @@ impl PlatformWindow {
             EndMenu();
         }
 
-        self.context
-            .run_loop
-            .borrow()
-            .schedule_now(move || {
-                let this = weak.upgrade();
-                if let Some(this) = this {
-                    this.window_menu.borrow().show_popup(menu, request, on_done);
-                }
-            })
-            .detach();
+        if let Some(context) = self.context.get() {
+            context
+                .run_loop
+                .borrow()
+                .schedule_now(move || {
+                    let this = weak.upgrade();
+                    if let Some(this) = this {
+                        this.window_menu.borrow().show_popup(menu, request, on_done);
+                    }
+                })
+                .detach();
+        }
     }
 
     pub fn hide_popup_menu(&self, menu: Rc<PlatformMenu>) -> PlatformResult<()> {
@@ -366,26 +382,28 @@ impl PlatformWindow {
         let menu = unsafe { GetSystemMenu(self.hwnd(), false) };
         let position = self.get_state().local_to_global(&Point::xy(0.0, 0.0));
         let hwnd = self.hwnd();
-        self.context
-            .run_loop
-            .borrow()
-            .schedule_now(move || unsafe {
-                let cmd = TrackPopupMenuEx(
-                    menu,
-                    TPM_RETURNCMD.0,
-                    position.x,
-                    position.y,
-                    hwnd,
-                    null_mut(),
-                );
-                SendMessageW(
-                    hwnd,
-                    WM_SYSCOMMAND as u32,
-                    WPARAM(cmd.0 as usize),
-                    LPARAM(0),
-                );
-            })
-            .detach();
+        if let Some(context) = self.context.get() {
+            context
+                .run_loop
+                .borrow()
+                .schedule_now(move || unsafe {
+                    let cmd = TrackPopupMenuEx(
+                        menu,
+                        TPM_RETURNCMD.0,
+                        position.x,
+                        position.y,
+                        hwnd,
+                        null_mut(),
+                    );
+                    SendMessageW(
+                        hwnd,
+                        WM_SYSCOMMAND as u32,
+                        WPARAM(cmd.0 as usize),
+                        LPARAM(0),
+                    );
+                })
+                .detach();
+        }
         Ok(())
     }
 
@@ -450,13 +468,15 @@ impl PlatformWindow {
                     );
                 }
                 let hwnd = self.child_hwnd();
-                self.context
-                    .run_loop
-                    .borrow()
-                    .schedule(Duration::from_secs(1), move || unsafe {
-                        SendMessageW(hwnd, WM_SHOWWINDOW as u32, WPARAM(1), LPARAM(1));
-                    })
-                    .detach();
+                if let Some(context) = self.context.get() {
+                    context
+                        .run_loop
+                        .borrow()
+                        .schedule(Duration::from_secs(1), move || unsafe {
+                            SendMessageW(hwnd, WM_SHOWWINDOW as u32, WPARAM(1), LPARAM(1));
+                        })
+                        .detach();
+                }
             }
             _ => {}
         }
@@ -477,9 +497,6 @@ impl PlatformWindow {
         }
 
         match msg {
-            WM_KEYDOWN => {
-                println!("KD");
-            }
             WM_SETFOCUS => unsafe {
                 SetFocus(self.child_hwnd());
             },

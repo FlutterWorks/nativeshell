@@ -1,6 +1,4 @@
 import 'dart:ui';
-
-import 'menu.dart';
 import 'util.dart';
 
 extension OffsetExt on Offset {
@@ -197,6 +195,7 @@ class WindowStyle {
     this.canMinimize = true,
     this.canMaximize = true,
     this.canFullScreen = true,
+    this.trafficLightOffset,
   });
 
   final WindowFrame frame;
@@ -207,6 +206,10 @@ class WindowStyle {
   final bool canMaximize; // ignored on mac
   final bool canFullScreen;
 
+  // macOS only and only applicable for WindowFrame.noTitle;
+  // Controls the offset of window traffic light.
+  final Offset? trafficLightOffset;
+
   dynamic serialize() => {
         'frame': enumToString(frame),
         'canResize': canResize,
@@ -214,6 +217,7 @@ class WindowStyle {
         'canMinimize': canMinimize,
         'canMaximize': canMaximize,
         'canFullScreen': canFullScreen,
+        'trafficLightOffset': trafficLightOffset?.serialize(),
       };
 
   static WindowStyle deserialize(dynamic value) {
@@ -232,60 +236,4 @@ class WindowStyle {
   String toString() {
     return serialize().toString();
   }
-}
-
-class PopupMenuRequest {
-  PopupMenuRequest({
-    required this.handle,
-    required this.position,
-    this.trackingRect,
-    this.itemRect,
-    this.preselectFirst = false,
-  });
-
-  final MenuHandle handle;
-  final Offset position;
-  final Rect? trackingRect;
-  final Rect? itemRect;
-  final bool preselectFirst;
-
-  dynamic serialize() => {
-        'handle': handle.value,
-        'position': position.serialize(),
-        'trackingRect': trackingRect?.serialize(),
-        'itemRect': itemRect?.serialize(),
-        'preselectFirst': preselectFirst,
-      };
-}
-
-class PopupMenuResponse {
-  PopupMenuResponse({
-    required this.itemSelected,
-  });
-
-  static PopupMenuResponse deserialize(dynamic value) {
-    final map = value as Map;
-    return PopupMenuResponse(itemSelected: map['itemSelected']);
-  }
-
-  dynamic serialize() => {
-        'itemSelected': itemSelected,
-      };
-
-  @override
-  String toString() => serialize().toString();
-
-  final bool itemSelected;
-}
-
-class HidePopupMenuRequest {
-  HidePopupMenuRequest({
-    required this.handle,
-  });
-
-  final MenuHandle handle;
-
-  dynamic serialize() => {
-        'handle': handle.value,
-      };
 }

@@ -4,7 +4,7 @@ import 'dart:ui';
 
 import 'package:flutter/services.dart';
 
-import 'key_interceptor.dart';
+import 'keyboard_map.dart';
 import 'mutex.dart';
 import 'util.dart';
 import 'api_constants.dart';
@@ -75,10 +75,21 @@ class MenuState {
         }
       }
 
+      // Listen for keyboard layout changes on top level menu. This is necessary
+      // to refresh menu if using accelerators with PhysicalKeys to display
+      // correct shortcut to user.
+      if (_materializeParent == null) {
+        KeyboardMap.onChange.addListener(_keyboardLayoutChanged);
+      }
+
       _currentHandle = await _materializer!
           .createOrUpdateMenuPost(this, _currentElements, handle);
       return _currentHandle!;
     }
+  }
+
+  void _keyboardLayoutChanged() {
+    update();
   }
 
   Future<void> _materializeSubmenu(
@@ -96,6 +107,10 @@ class MenuState {
   MenuMaterializer? _materializer;
 
   Future<void> _unmaterializeLocked() {
+    if (_materializeParent == null) {
+      assert(this == _transferTarget); // top level menu should not be traferred
+      KeyboardMap.onChange.removeListener(_keyboardLayoutChanged);
+    }
     return _transferTarget._doUnmaterialize();
   }
 
@@ -178,7 +193,7 @@ class MenuState {
     return false;
   }
 
-  VoidCallback? actionForEvent(RawKeyEventEx event) {
+  VoidCallback? actionForEvent(RawKeyEvent event) {
     for (final e in _transferTarget._currentElements) {
       if (e.item.action != null &&
           e.item.accelerator != null &&
@@ -238,17 +253,26 @@ class MenuState {
         existing = currentByMenu.remove(i.submenu);
 
         // otherwise take item with same name but possible different submenu,
-        // as long as new item has not bee nmaterialized
+        // as long as new item has not been materialized
         if (i.submenu?.state.currentHandle == null) {
           existing ??= currentByItem.remove(i);
         }
       }
       if (existing != null) {
-        res.add(MenuElement(id: existing.id, item: i));
+        // We have existing item, but make sure that we can actually reuse it.
+        // It must match perfectly and the accelerator label must not have
+        // changed (i.e. due to keyboard layout change).
+        final id = existing.item == i &&
+                existing.acceleratorLabel == i.accelerator?.label
+            ? existing.id
+            : _nextItemId++;
+        res.add(MenuElement(id: id, item: i));
+        currentByItem.remove(existing.item);
 
-        if (existing.item.submenu != null &&
-            !identical(existing.item.submenu, i.submenu)) {
-          i.submenu!.state._transferFrom(existing.item.submenu!.state);
+        if (existing.item.submenu != null) {
+          if (!identical(existing.item.submenu, i.submenu)) {
+            i.submenu!.state._transferFrom(existing.item.submenu!.state);
+          }
           outPreserved.add(i.submenu!.state);
         }
       } else {
@@ -306,11 +330,12 @@ class MenuElement {
   MenuElement({
     required this.id,
     required this.item,
-  });
+  }) : acceleratorLabel = item.accelerator?.label;
 
   final int id;
 
   final MenuItem item;
+  final String? acceleratorLabel;
 
   @override
   bool operator ==(Object other) =>
@@ -413,6 +438,14 @@ class MenuManager {
       final menu = _activeMenus[handle];
       if (menu != null) {
         menu.onAction(id);
+      }
+    } else if (call.method == Methods.menuOnOpen) {
+      final handle = MenuHandle(call.arguments['handle'] as int);
+      final menu = _activeMenus[handle];
+      if (menu != null) {
+        if (menu.menu.onOpen != null) {
+          menu.menu.onOpen!();
+        }
       }
     } else if (call.method == Methods.menubarMoveToPreviousMenu) {
       for (final d in _delegates) {

@@ -3,20 +3,23 @@ use std::{
     cmp::max,
     collections::HashMap,
     fmt::Write,
+    ptr,
     rc::{Rc, Weak},
 };
 
-use gdk::{ModifierType, WindowExt};
+use gdk::ModifierType;
 use glib::{Cast, ObjectExt};
 use gtk::{
-    AccelLabel, AccelLabelExt, BinExt, ContainerExt, GtkMenuExt, GtkMenuItemExt, MenuDirectionType,
-    MenuShellExt, WidgetExt,
+    prelude::{
+        AccelLabelExt, BinExt, ContainerExt, GtkMenuExt, GtkMenuItemExt, MenuShellExt, WidgetExt,
+    },
+    AccelLabel, MenuDirectionType,
 };
 
 use crate::{
     shell::{
         api_model::{Accelerator, CheckStatus, Menu, MenuItem},
-        Context, MenuHandle, MenuManager,
+        Context, MenuDelegate, MenuHandle, MenuManager,
     },
     util::{update_diff, DiffResult, LateRefCell},
 };
@@ -30,7 +33,7 @@ use super::{
 };
 
 pub struct PlatformMenu {
-    context: Rc<Context>,
+    context: Context,
     handle: MenuHandle,
     weak_self: LateRefCell<Weak<PlatformMenu>>,
     pub(super) menu: gtk::Menu,
@@ -39,11 +42,17 @@ pub struct PlatformMenu {
     item_selected: Cell<bool>,
     on_selection_done: RefCell<Option<Box<dyn FnOnce(bool)>>>,
     ignore_activate: Cell<bool>,
+    pending_selection_done: Cell<bool>,
+    delegate: Weak<RefCell<dyn MenuDelegate>>,
 }
 
 #[allow(unused_variables)]
 impl PlatformMenu {
-    pub fn new(context: Rc<Context>, handle: MenuHandle) -> Self {
+    pub fn new(
+        context: Context,
+        handle: MenuHandle,
+        delegate: Weak<RefCell<dyn MenuDelegate>>,
+    ) -> Self {
         let m = gtk::Menu::new();
 
         Self {
@@ -56,6 +65,8 @@ impl PlatformMenu {
             item_selected: Cell::new(false),
             on_selection_done: RefCell::new(None),
             ignore_activate: Cell::new(false),
+            pending_selection_done: Cell::new(false),
+            delegate,
         }
     }
 
@@ -79,6 +90,34 @@ impl PlatformMenu {
                 s.on_move_current(dir);
             }
         });
+
+        let weak = self.weak_self.borrow().clone();
+        self.menu.connect_show(move |_| {
+            if let Some(s) = weak.upgrade() {
+                if let Some(delegate) = s.delegate.upgrade() {
+                    delegate.borrow().on_menu_open(s.handle);
+                }
+            }
+        });
+
+        self.menu.connect_hide(move |menu| {
+            if let Some(platform_menu) = Self::platform_menu_from_gtk_menu(menu) {
+                platform_menu.set_pending_selection_done();
+                // Fix for https://github.com/nativeshell/examples/issues/13
+                // Sometimes on KDE/Wayland when activating another window the
+                // selection_done event is not fired. So we trigger it here.
+                let platform_menu_clone = platform_menu.clone();
+                if let Some(context) = platform_menu.context.get() {
+                    context
+                        .run_loop
+                        .borrow()
+                        .schedule_now(move || {
+                            platform_menu_clone.trigger_selection_done();
+                        })
+                        .detach();
+                }
+            }
+        });
     }
 
     // Callback will be fired if item in this menu or any submenu is selected
@@ -89,17 +128,23 @@ impl PlatformMenu {
             .replace(Box::new(callback));
     }
 
+    pub fn set_pending_selection_done(&self) {
+        self.pending_selection_done.set(true);
+    }
+
     pub fn trigger_selection_done(&self) {
-        let done = self.on_selection_done.borrow_mut().take();
-        if let Some(done) = done {
-            done(self.item_selected.get());
+        if self.pending_selection_done.replace(false) {
+            let done = self.on_selection_done.borrow_mut().take();
+            if let Some(done) = done {
+                done(self.item_selected.get());
+            }
         }
     }
 
     fn platform_menu_from_gtk_menu(menu: &gtk::Menu) -> Option<Rc<PlatformMenu>> {
-        let platform_menu: Option<&Weak<PlatformMenu>> =
-            unsafe { menu.get_data("nativeshell_platform_menu") };
-        platform_menu.and_then(|m| m.upgrade())
+        let platform_menu: Option<ptr::NonNull<Weak<PlatformMenu>>> =
+            unsafe { menu.data("nativeshell_platform_menu") };
+        platform_menu.and_then(|m| unsafe { m.as_ref() }.upgrade())
     }
 
     pub fn update_from_menu(&self, menu: Menu, manager: &MenuManager) -> PlatformResult<()> {
@@ -170,13 +215,13 @@ impl PlatformMenu {
     }
 
     fn resize_menu_if_needed(&self) {
-        let top_level = self.menu.get_toplevel();
-        let win = top_level.as_ref().and_then(|w| w.get_window());
+        let top_level = self.menu.toplevel();
+        let win = top_level.as_ref().and_then(|w| w.window());
         if let (Some(win), Some(top_level)) = (win, top_level) {
             if win.is_visible() {
-                let natural_size = top_level.get_preferred_size().1;
-                let width = win.get_width();
-                let height = win.get_height();
+                let natural_size = top_level.preferred_size().1;
+                let width = win.width();
+                let height = win.height();
 
                 if width < natural_size.width || height < natural_size.height {
                     win.resize(
@@ -221,7 +266,7 @@ impl PlatformMenu {
     }
 
     fn menu_item_selected(&self, menu_item: &gtk::MenuItem) {
-        if menu_item.get_submenu().is_some() {
+        if menu_item.submenu().is_some() {
             return; // not interested in submenus
         }
         let id_to_menu_item = self.id_to_menu_item.borrow();
@@ -233,10 +278,9 @@ impl PlatformMenu {
 
         let entry = id_to_menu_item.iter().find(|e| e.1 == menu_item);
         if let Some(entry) = entry {
-            self.context
-                .menu_manager
-                .borrow()
-                .on_menu_action(self.handle, *entry.0);
+            if let Some(delegate) = self.delegate.upgrade() {
+                delegate.borrow().on_menu_action(self.handle, *entry.0);
+            }
         }
     }
 
@@ -245,8 +289,8 @@ impl PlatformMenu {
 
         loop {
             let widget = res
-                .get_attach_widget()
-                .and_then(|w| w.get_parent())
+                .attach_widget()
+                .and_then(|w| w.parent())
                 .and_then(|w| w.downcast::<gtk::Menu>().ok());
             match widget {
                 Some(widget) => {
@@ -262,6 +306,7 @@ impl PlatformMenu {
     }
 
     // Convert & mnemonics to _
+    #[allow(clippy::branches_sharing_code)]
     fn convert_mnemonics(title: &str) -> String {
         let mut res = String::new();
         let mut mnemonic = false;
@@ -315,10 +360,10 @@ impl PlatformMenu {
             "space" => gdk_sys::GDK_KEY_space,
             "tab" => gdk_sys::GDK_KEY_Tab,
             "enter" => gdk_sys::GDK_KEY_KP_Enter,
-            "up arrow" => gdk_sys::GDK_KEY_Up,
-            "down arrow" => gdk_sys::GDK_KEY_Down,
-            "left arrow" => gdk_sys::GDK_KEY_Left,
-            "right arrow" => gdk_sys::GDK_KEY_Right,
+            "arrow up" => gdk_sys::GDK_KEY_Up,
+            "arrow down" => gdk_sys::GDK_KEY_Down,
+            "arrow left" => gdk_sys::GDK_KEY_Left,
+            "arrow right" => gdk_sys::GDK_KEY_Right,
             _ => label.chars().next().unwrap_or(0 as char) as i32,
         };
         value
@@ -350,15 +395,15 @@ impl PlatformMenu {
         item.set_label(&Self::convert_mnemonics(&menu_item.title));
 
         let label = item
-            .get_child()
+            .child()
             .and_then(|c| c.downcast::<AccelLabel>().ok())
             .unwrap();
 
         match &menu_item.accelerator {
             Some(accelerator) => {
                 label.set_accel(
-                    Self::accelerator_label_code(&accelerator) as u32,
-                    Self::accelerator_modifier_type(&accelerator),
+                    Self::accelerator_label_code(accelerator) as u32,
+                    Self::accelerator_modifier_type(accelerator),
                 );
             }
             None => {
@@ -429,10 +474,10 @@ impl PlatformMenu {
         } else if direction == MenuDirectionType::Child {
             let selected = self
                 .menu
-                .get_selected_item()
+                .selected_item()
                 .and_then(|w| w.downcast::<gtk::MenuItem>().ok());
             if let Some(selected) = selected {
-                if selected.get_submenu().is_none() {
+                if selected.submenu().is_none() {
                     self.move_to_next_menu();
                 }
             }
@@ -440,26 +485,26 @@ impl PlatformMenu {
     }
 
     pub fn move_to_previous_menu(&self) {
-        self.context
-            .menu_manager
-            .borrow()
-            .move_to_previous_menu(self.handle);
+        if let Some(delegate) = self.delegate.upgrade() {
+            delegate.borrow().move_to_previous_menu(self.handle);
+        }
     }
 
     pub fn move_to_next_menu(&self) {
-        self.context
-            .menu_manager
-            .borrow()
-            .move_to_next_menu(self.handle);
+        if let Some(delegate) = self.delegate.upgrade() {
+            delegate.borrow().move_to_next_menu(self.handle);
+        }
     }
 }
 
 pub struct PlatformMenuManager {}
 
 impl PlatformMenuManager {
-    pub fn new(_context: Rc<Context>) -> Self {
+    pub fn new(_context: Context) -> Self {
         Self {}
     }
+
+    pub(crate) fn assign_weak_self(&self, _weak_self: Weak<PlatformMenuManager>) {}
 
     pub fn set_app_menu(&self, _menu: Option<Rc<PlatformMenu>>) -> PlatformResult<()> {
         Err(PlatformError::NotImplemented)

@@ -4,15 +4,18 @@ use std::{
     rc::{Rc, Weak},
 };
 
+use crate::shell::{
+    api_model::{DragData, DragEffect, DragRequest, DraggingInfo},
+    Context, ContextRef, PlatformWindowDelegate, Point,
+};
 use cocoa::{
     base::{id, nil, BOOL, NO, YES},
     foundation::{NSInteger, NSPoint, NSRect, NSUInteger},
 };
-use objc::rc::{autoreleasepool, StrongPtr};
-
-use crate::shell::{
-    api_model::{DragData, DragEffect, DragRequest, DraggingInfo},
-    Context, PlatformWindowDelegate, Point,
+use objc::{
+    class, msg_send,
+    rc::{autoreleasepool, StrongPtr},
+    sel, sel_impl,
 };
 
 use super::{
@@ -20,14 +23,14 @@ use super::{
         DragDataAdapter, FallThroughDragDataAdapter, FilesDragDataAdapter, PasteboardItems,
         UrlsDragDataAdapter,
     },
-    utils::{array_with_objects, ns_image_from},
+    utils::{array_with_objects, flip_rect, ns_image_from},
     window::PlatformWindow,
 };
 
 pub type NSDragOperation = NSUInteger;
 
 pub struct DragContext {
-    context: Rc<Context>,
+    context: Context,
     window: Weak<PlatformWindow>,
     next_drag_operation: Cell<NSDragOperation>,
     data_adapters: Vec<Box<dyn DragDataAdapter>>,
@@ -44,9 +47,9 @@ const NSDragOperationLink: NSDragOperation = 2;
 const NSDragOperationMove: NSDragOperation = 16;
 
 impl DragContext {
-    pub fn new(context: Rc<Context>, window: Weak<PlatformWindow>) -> Self {
+    pub fn new(context: &ContextRef, window: Weak<PlatformWindow>) -> Self {
         Self {
-            context: context.clone(),
+            context: context.weak(),
             window,
             next_drag_operation: Cell::new(NSDragOperationNone),
             data_adapters: vec![
@@ -59,18 +62,20 @@ impl DragContext {
     }
 
     pub fn register(&self, window: id) {
-        let mut types = Vec::<StrongPtr>::new();
+        if let Some(context) = self.context.get() {
+            let mut types = Vec::<StrongPtr>::new();
 
-        for adapter in &self.context.options.custom_drag_data_adapters {
-            adapter.register_types(&mut types);
-        }
-        for adapter in &self.data_adapters {
-            adapter.register_types(&mut types);
-        }
+            for adapter in &context.options.custom_drag_data_adapters {
+                adapter.register_types(&mut types);
+            }
+            for adapter in &self.data_adapters {
+                adapter.register_types(&mut types);
+            }
 
-        unsafe {
-            let types = array_with_objects(&types);
-            let () = msg_send![window, registerForDraggedTypes: types];
+            unsafe {
+                let types = array_with_objects(&types);
+                let () = msg_send![window, registerForDraggedTypes: types];
+            }
         }
     }
 
@@ -134,8 +139,10 @@ impl DragContext {
             let pasteboard: id = msg_send![dragging_info, draggingPasteboard];
 
             let mut data = HashMap::new();
-            for adapter in &self.context.options.custom_drag_data_adapters {
-                adapter.retrieve_drag_data(pasteboard, &mut data);
+            if let Some(context) = self.context.get() {
+                for adapter in &context.options.custom_drag_data_adapters {
+                    adapter.retrieve_drag_data(pasteboard, &mut data);
+                }
             }
             for adapter in &self.data_adapters {
                 adapter.retrieve_drag_data(pasteboard, &mut data);
@@ -159,9 +166,11 @@ impl DragContext {
 
         let mut data = request.data.properties;
 
-        for adapter in &self.context.options.custom_drag_data_adapters {
-            pasteboard_items.reset_index();
-            adapter.prepare_drag_data(&mut data, &mut pasteboard_items);
+        if let Some(context) = self.context.get() {
+            for adapter in &context.options.custom_drag_data_adapters {
+                pasteboard_items.reset_index();
+                adapter.prepare_drag_data(&mut data, &mut pasteboard_items);
+            }
         }
         for adapter in &self.data_adapters {
             pasteboard_items.reset_index();
@@ -170,8 +179,9 @@ impl DragContext {
 
         let mut first = true;
         let mut dragging_items = Vec::<StrongPtr>::new();
-        let snapshot = ns_image_from(request.image);
-        let rect: NSRect = request.rect.into();
+        let snapshot = ns_image_from(vec![request.image]);
+        let mut rect: NSRect = request.rect.into();
+        flip_rect(view, &mut rect);
 
         for item in pasteboard_items.get_items() {
             let dragging_item: id = msg_send![class!(NSDraggingItem), alloc];

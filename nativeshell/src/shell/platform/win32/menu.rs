@@ -12,7 +12,7 @@ use super::{
 use crate::{
     shell::{
         api_model::{CheckStatus, Menu, MenuItem},
-        Context, MenuHandle, MenuManager,
+        Context, MenuDelegate, MenuHandle, MenuManager,
     },
     util::{update_diff, DiffResult},
 };
@@ -22,14 +22,17 @@ pub struct PlatformMenu {
     pub(super) menu: HMENU,
     previous_menu: RefCell<Menu>,
     weak_self: RefCell<Weak<PlatformMenu>>,
+    pub(super) delegate: Weak<RefCell<dyn MenuDelegate>>,
 }
 
 pub struct PlatformMenuManager {}
 
 impl PlatformMenuManager {
-    pub fn new(_context: Rc<Context>) -> Self {
+    pub fn new(_context: Context) -> Self {
         Self {}
     }
+
+    pub(crate) fn assign_weak_self(&self, _weak_self: Weak<PlatformMenuManager>) {}
 
     pub fn set_app_menu(&self, _menu: Option<Rc<PlatformMenu>>) -> PlatformResult<()> {
         Err(PlatformError::NotAvailable)
@@ -37,7 +40,11 @@ impl PlatformMenuManager {
 }
 
 impl PlatformMenu {
-    pub fn new(_context: Rc<Context>, handle: MenuHandle) -> Self {
+    pub fn new(
+        _context: Context,
+        handle: MenuHandle,
+        delegate: Weak<RefCell<dyn MenuDelegate>>,
+    ) -> Self {
         let menu = unsafe {
             let menu = CreatePopupMenu();
 
@@ -59,6 +66,7 @@ impl PlatformMenu {
             menu,
             previous_menu: RefCell::new(Default::default()),
             weak_self: RefCell::new(Weak::new()),
+            delegate,
         }
     }
 
@@ -142,14 +150,14 @@ impl PlatformMenu {
                     // nothing
                 }
                 DiffResult::Update(old, new) => {
-                    let title = to_utf16(&self.title_for_item(&new));
+                    let title = to_utf16(&self.title_for_item(new));
                     let mut info = Self::get_menu_item_info(new, &title, manager);
                     unsafe {
                         SetMenuItemInfoW(self.menu, old.id as u32, false, &mut info as *mut _);
                     }
                 }
                 DiffResult::Insert(item) => {
-                    let title = to_utf16(&self.title_for_item(&item));
+                    let title = to_utf16(&self.title_for_item(item));
                     let mut info = Self::get_menu_item_info(item, &title, manager);
                     unsafe {
                         InsertMenuItemW(self.menu, i as u32, true, &mut info as *mut _);

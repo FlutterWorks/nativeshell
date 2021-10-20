@@ -4,14 +4,12 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use windows::create_instance;
-
 use crate::{
     shell::{
         api_model::{DragData, DragEffect, DragRequest, DraggingInfo},
-        Context, IPoint,
+        Context, ContextRef, IPoint,
     },
-    util::LateRefCell,
+    util::{LateRefCell, OkLog},
 };
 
 use super::{
@@ -24,14 +22,14 @@ use super::{
         create_dragimage_bitmap, CLSID_DragDropHelper,
     },
     error::PlatformResult,
-    util::HRESULTExt,
+    util::create_instance,
     window::PlatformWindow,
 };
 
 use super::all_bindings::*;
 
 pub struct DragContext {
-    context: Rc<Context>,
+    context: Context,
     weak_self: LateRefCell<Weak<DragContext>>,
     window: Weak<PlatformWindow>,
     drag_data: RefCell<Option<DragData>>,
@@ -40,9 +38,9 @@ pub struct DragContext {
 }
 
 impl DragContext {
-    pub fn new(context: Rc<Context>, window: Weak<PlatformWindow>) -> Self {
+    pub fn new(context: &ContextRef, window: Weak<PlatformWindow>) -> Self {
         Self {
-            context: context.clone(),
+            context: context.weak(),
             weak_self: LateRefCell::new(),
             window,
             drag_data: RefCell::new(None),
@@ -58,7 +56,8 @@ impl DragContext {
     pub fn assign_weak_self(&self, weak_self: Weak<DragContext>) {
         self.weak_self.set(weak_self);
         let window = self.window.upgrade().unwrap();
-        let target: IDropTarget = DropTarget::new(window.hwnd(), self.weak_self.clone_value());
+        let target: IDropTarget =
+            DropTarget::new(window.hwnd(), self.weak_self.clone_value()).into();
         unsafe {
             RegisterDragDrop(window.hwnd(), target).ok_log();
         }
@@ -70,29 +69,33 @@ impl DragContext {
 
     pub fn shut_down(&self) -> PlatformResult<()> {
         let window = self.window.upgrade().unwrap();
-        unsafe { RevokeDragDrop(window.hwnd()).as_platform_result() }
+        unsafe { RevokeDragDrop(window.hwnd()).map_err(|e| e.into()) }
     }
 
     pub fn begin_drag_session(&self, request: DragRequest) -> PlatformResult<()> {
         let weak = self.weak_self.clone_value();
-        self.context
-            .run_loop
-            .borrow()
-            .schedule_now(move || {
-                if let Some(s) = weak.upgrade() {
-                    unsafe {
-                        s.start_drag_internal(request);
+        if let Some(context) = self.context.get() {
+            context
+                .run_loop
+                .borrow()
+                .schedule_now(move || {
+                    if let Some(s) = weak.upgrade() {
+                        unsafe {
+                            s.start_drag_internal(request);
+                        }
                     }
-                }
-            })
-            .detach();
+                })
+                .detach();
+        }
         Ok(())
     }
 
     fn serialize_drag_data(&self, mut data: DragData) -> HashMap<u32, Vec<u8>> {
         let mut res = HashMap::new();
-        for adapter in &self.context.options.custom_drag_data_adapters {
-            adapter.prepare_drag_data(&mut data.properties, &mut res);
+        if let Some(context) = self.context.get() {
+            for adapter in &context.options.custom_drag_data_adapters {
+                adapter.prepare_drag_data(&mut data.properties, &mut res);
+            }
         }
         for adapter in &self.data_adapters {
             adapter.prepare_drag_data(&mut data.properties, &mut res);
@@ -103,8 +106,10 @@ impl DragContext {
     fn deserialize_drag_data(&self, data: IDataObject) -> DragData {
         let mut res: DragData = Default::default();
 
-        for adapter in &self.context.options.custom_drag_data_adapters {
-            adapter.retrieve_drag_data(data.clone(), &mut res.properties);
+        if let Some(context) = self.context.get() {
+            for adapter in &context.options.custom_drag_data_adapters {
+                adapter.retrieve_drag_data(data.clone(), &mut res.properties);
+            }
         }
 
         for adapter in &self.data_adapters {
@@ -118,7 +123,7 @@ impl DragContext {
         let window = self.window.upgrade().unwrap();
         let data = self.serialize_drag_data(request.data);
         let data = Rc::new(RefCell::new(data));
-        let data = DataObject::new(Rc::downgrade(&data));
+        let data: IDataObject = DataObject::new(Rc::downgrade(&data)).into();
         let helper: IDragSourceHelper = create_instance(&CLSID_DragDropHelper).unwrap();
         let hbitmap = create_dragimage_bitmap(&request.image);
         let image_start = window.local_to_global(request.rect.origin());
@@ -135,12 +140,12 @@ impl DragContext {
                 y: cursor_pos.y - image_start.y,
             },
             hbmpDragImage: hbitmap,
-            crColorKey: 0,
+            crColorKey: 0xFFFFFFFF,
         };
         helper
             .InitializeFromBitmap(&mut image as *mut _, data.clone())
             .ok_log();
-        let source = DropSource::new();
+        let source: IDropSource = DropSource::new().into();
         let ok_effects = convert_drag_effects(&request.allowed_effects);
         let mut effects_out: u32 = 0;
         let res = DoDragDrop(data, source, ok_effects, &mut effects_out as *mut u32);

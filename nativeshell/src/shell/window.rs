@@ -9,7 +9,7 @@ use crate::{
         Value,
     },
     util::{LateRefCell, OkLog},
-    Result,
+    Error, Result,
 };
 
 use super::{
@@ -20,14 +20,15 @@ use super::{
         WindowGeometryRequest, WindowStyle,
     },
     platform::window::PlatformWindow,
-    Context, EngineHandle, WindowMethodCallReply, WindowMethodCallResult, WindowMethodInvoker,
+    Context, EngineHandle, MenuDelegate, WindowMethodCallReply, WindowMethodCallResult,
+    WindowMethodInvoker,
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Copy, Clone, Hash, Eq, PartialEq)]
 pub struct WindowHandle(pub(super) i64);
 
 pub(super) struct Window {
-    context: Rc<Context>,
+    context: Context,
     pub(super) window_handle: WindowHandle,
     pub(super) engine_handle: EngineHandle,
     pub(super) platform_window: LateRefCell<Rc<PlatformWindow>>,
@@ -39,7 +40,7 @@ pub(super) struct Window {
 
 impl Window {
     pub(crate) fn new(
-        context: Rc<Context>,
+        context: Context,
         window_handle: WindowHandle,
         engine_handle: EngineHandle,
         init_data: Value,
@@ -72,36 +73,37 @@ impl Window {
     // }
 
     fn broadcast_message(&self, message: &str, arguments: Value) {
-        let broadcaster = self
-            .context
-            .window_method_channel
-            .borrow()
-            .get_message_broadcaster(self.window_handle, channel::win::WINDOW_MANAGER);
-        broadcaster.broadcast_message(message, arguments);
+        if let Some(context) = self.context.get() {
+            let broadcaster = context
+                .window_method_channel
+                .borrow()
+                .get_message_broadcaster(self.window_handle, channel::win::WINDOW_MANAGER);
+            broadcaster.broadcast_message(message, arguments);
+        }
     }
 
-    fn drop_target_invoker(&self) -> WindowMethodInvoker {
-        self.context
-            .window_method_channel
-            .borrow()
-            .get_method_invoker(
-                &self.context.window_manager.borrow(),
+    fn drop_target_invoker(&self) -> Option<WindowMethodInvoker> {
+        if let Some(context) = self.context.get() {
+            context.window_method_channel.borrow().get_method_invoker(
+                &context.window_manager.borrow(),
                 self.window_handle,
                 channel::win::DROP_TARGET,
             )
-            .unwrap()
+        } else {
+            None
+        }
     }
 
-    fn drag_source_invoker(&self) -> WindowMethodInvoker {
-        self.context
-            .window_method_channel
-            .borrow()
-            .get_method_invoker(
-                &self.context.window_manager.borrow(),
+    fn drag_source_invoker(&self) -> Option<WindowMethodInvoker> {
+        if let Some(context) = self.context.get() {
+            context.window_method_channel.borrow().get_method_invoker(
+                &context.window_manager.borrow(),
                 self.window_handle,
                 channel::win::DRAG_SOURCE,
             )
-            .unwrap()
+        } else {
+            None
+        }
     }
 
     fn platform_window(&self) -> Rc<PlatformWindow> {
@@ -128,6 +130,10 @@ impl Window {
 
     fn hide(&self) -> Result<()> {
         self.platform_window().hide().map_err(|e| e.into())
+    }
+
+    fn activate(&self) -> Result<bool> {
+        self.platform_window().activate().map_err(|e| e.into())
     }
 
     fn set_geometry(&self, geometry: WindowGeometryRequest) -> Result<WindowGeometryFlags> {
@@ -158,6 +164,18 @@ impl Window {
             .map_err(|e| e.into())
     }
 
+    fn save_position_to_string(&self) -> Result<String> {
+        self.platform_window()
+            .save_position_to_string()
+            .map_err(|e| e.into())
+    }
+
+    fn restore_position_from_string(&self, position: String) -> Result<()> {
+        self.platform_window()
+            .restore_position_from_string(position)
+            .map_err(|e| e.into())
+    }
+
     fn perform_window_drag(&self) -> Result<()> {
         self.platform_window()
             .perform_window_drag()
@@ -174,28 +192,34 @@ impl Window {
     where
         F: FnOnce(Result<PopupMenuResponse>) + 'static,
     {
-        let menu = self
-            .context
-            .menu_manager
-            .borrow()
-            .get_platform_menu(request.handle);
-        match menu {
-            Ok(menu) => self
-                .platform_window()
-                .show_popup_menu(menu, request, |r| on_done(r.map_err(|e| e.into()))),
-            Err(error) => on_done(Err(error)),
+        if let Some(context) = self.context.get() {
+            let menu = context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu(request.handle);
+            match menu {
+                Ok(menu) => self
+                    .platform_window()
+                    .show_popup_menu(menu, request, |r| on_done(r.map_err(|e| e.into()))),
+                Err(error) => on_done(Err(error)),
+            }
         }
     }
 
     fn hide_popup_menu(&self, request: HidePopupMenuRequest) -> Result<()> {
-        let menu = self
-            .context
-            .menu_manager
-            .borrow()
-            .get_platform_menu(request.handle)?;
-        self.platform_window()
-            .hide_popup_menu(menu)
-            .map_err(|e| e.into())
+        if let Some(context) = self.context.get() {
+            let menu = context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu(request.handle)?;
+            self.platform_window()
+                .hide_popup_menu(menu)
+                .map_err(|e| e.into())
+        } else {
+            Err(Error::InvalidContext)
+        }
     }
 
     fn show_system_menu(&self) -> Result<()> {
@@ -205,21 +229,25 @@ impl Window {
     }
 
     fn set_window_menu(&self, request: SetMenuRequest) -> Result<()> {
-        match request.handle {
-            Some(handle) => {
-                let menu = self
-                    .context
-                    .menu_manager
-                    .borrow()
-                    .get_platform_menu(handle)?;
-                self.platform_window()
-                    .set_window_menu(Some(menu))
-                    .map_err(|e| e.into())
+        if let Some(context) = self.context.get() {
+            match request.handle {
+                Some(handle) => {
+                    let menu = context
+                        .menu_manager
+                        .borrow()
+                        .borrow()
+                        .get_platform_menu(handle)?;
+                    self.platform_window()
+                        .set_window_menu(Some(menu))
+                        .map_err(|e| e.into())
+                }
+                None => self
+                    .platform_window()
+                    .set_window_menu(None)
+                    .map_err(|e| e.into()),
             }
-            None => self
-                .platform_window()
-                .set_window_menu(None)
-                .map_err(|e| e.into()),
+        } else {
+            Err(Error::InvalidContext)
         }
     }
 
@@ -271,6 +299,9 @@ impl Window {
             method::window::HIDE => {
                 return Self::reply(reply, &arg, |()| self.hide());
             }
+            method::window::ACTIVATE => {
+                return Self::reply(reply, &arg, |()| self.activate());
+            }
             method::window::SET_GEOMETRY => {
                 return Self::reply(reply, &arg, |geometry| self.set_geometry(geometry));
             }
@@ -285,6 +316,14 @@ impl Window {
             }
             method::window::SET_TITLE => {
                 return Self::reply(reply, &arg, |title| self.set_title(title));
+            }
+            method::window::SAVE_POSITION_TO_STRING => {
+                return Self::reply(reply, &arg, |()| self.save_position_to_string());
+            }
+            method::window::RESTORE_POSITION_FROM_STRING => {
+                return Self::reply(reply, &arg, |position: String| {
+                    self.restore_position_from_string(position)
+                });
             }
             method::window::PERFORM_WINDOW_DRAG => {
                 return Self::reply(reply, &arg, |()| self.perform_window_drag());
@@ -328,6 +367,8 @@ pub trait PlatformWindowDelegate {
     fn perform_drop(&self, info: &DraggingInfo);
 
     fn drag_ended(&self, effect: DragEffect);
+
+    fn get_engine_handle(&self) -> EngineHandle;
 }
 
 impl PlatformWindowDelegate for Window {
@@ -340,53 +381,67 @@ impl PlatformWindowDelegate for Window {
     }
 
     fn will_close(&self) {
-        self.broadcast_message(event::window::CLOSE, Value::Null);
-        self.context.window_manager.borrow_mut().remove_window(self);
+        if let Some(context) = self.context.get() {
+            self.broadcast_message(event::window::CLOSE, Value::Null);
+            context.window_manager.borrow_mut().remove_window(self);
+        }
     }
 
     fn dragging_exited(&self) {
-        self.drop_target_invoker()
-            .call_method(method::drop_target::DRAGGING_EXITED, Value::Null, |_| {})
-            .ok_log();
+        if let Some(invoker) = self.drop_target_invoker() {
+            invoker
+                .call_method(method::drag_driver::DRAGGING_EXITED, Value::Null, |_| {})
+                .ok_log();
+        }
     }
 
     fn dragging_updated(&self, info: &DraggingInfo) {
         let weak = self.weak_self.clone_value();
-        self.drop_target_invoker()
-            .call_method(
-                method::drop_target::DRAGGING_UPDATED,
-                to_value(info).unwrap(),
-                move |r| {
-                    let s = weak.upgrade();
-                    if let (Ok(result), Some(s)) = (r, s) {
-                        let result: DragResult =
-                            from_value(&result).ok_log().unwrap_or(DragResult {
-                                effect: DragEffect::None,
-                            });
-                        s.platform_window().set_pending_effect(result.effect);
-                    }
-                },
-            )
-            .ok_log();
+        if let Some(invoker) = self.drop_target_invoker() {
+            invoker
+                .call_method(
+                    method::drag_driver::DRAGGING_UPDATED,
+                    to_value(info).unwrap(),
+                    move |r| {
+                        let s = weak.upgrade();
+                        if let (Ok(result), Some(s)) = (r, s) {
+                            let result: DragResult =
+                                from_value(&result).ok_log().unwrap_or(DragResult {
+                                    effect: DragEffect::None,
+                                });
+                            s.platform_window().set_pending_effect(result.effect);
+                        }
+                    },
+                )
+                .ok_log();
+        }
     }
 
     fn perform_drop(&self, info: &DraggingInfo) {
-        self.drop_target_invoker()
-            .call_method(
-                method::drop_target::PERFORM_DROP,
-                to_value(info).unwrap(),
-                |_| {},
-            )
-            .ok_log();
+        if let Some(invoker) = self.drop_target_invoker() {
+            invoker
+                .call_method(
+                    method::drag_driver::PERFORM_DROP,
+                    to_value(info).unwrap(),
+                    |_| {},
+                )
+                .ok_log();
+        }
     }
 
     fn drag_ended(&self, effect: DragEffect) {
-        self.drag_source_invoker()
-            .call_method(
-                method::drag_source::DRAG_SESSION_ENDED,
-                to_value(effect).unwrap(),
-                |_| {},
-            )
-            .ok_log();
+        if let Some(invoker) = self.drag_source_invoker() {
+            invoker
+                .call_method(
+                    method::drag_source::DRAG_SESSION_ENDED,
+                    to_value(effect).unwrap(),
+                    |_| {},
+                )
+                .ok_log();
+        }
+    }
+
+    fn get_engine_handle(&self) -> EngineHandle {
+        self.engine_handle
     }
 }

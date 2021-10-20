@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    rc::Weak,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -23,6 +24,10 @@ struct Timer {
 
 type SenderCallback = Box<dyn FnOnce() + Send>;
 
+pub(crate) trait PlatformRunLoopHotKeyDelegate {
+    fn on_hot_key(&self, hot_key: i32);
+}
+
 struct State {
     next_handle: Cell<HandleType>,
     hwnd: Cell<HWND>,
@@ -30,6 +35,8 @@ struct State {
 
     // Callbacks sent from other threads
     sender_callbacks: Arc<Mutex<Vec<SenderCallback>>>,
+
+    hot_key_delegate: RefCell<Option<Weak<dyn PlatformRunLoopHotKeyDelegate>>>,
 }
 
 impl State {
@@ -39,6 +46,7 @@ impl State {
             hwnd: Cell::new(HWND(0)),
             timers: RefCell::new(HashMap::new()),
             sender_callbacks: Arc::new(Mutex::new(Vec::new())),
+            hot_key_delegate: RefCell::new(None),
         }
     }
 
@@ -53,7 +61,7 @@ impl State {
     fn wake_up_at(&self, time: Instant) {
         let wait_time = time.saturating_duration_since(Instant::now());
         unsafe {
-            SetTimer(self.hwnd.get(), 0, wait_time.as_millis() as u32, None);
+            SetTimer(self.hwnd.get(), 1, wait_time.as_millis() as u32, None);
         }
     }
 
@@ -94,6 +102,7 @@ impl State {
 
     pub fn unschedule(&self, handle: HandleType) {
         self.timers.borrow_mut().remove(&handle);
+        self.wake_up_at(self.next_timer());
     }
 
     fn process_timers(&self) -> Instant {
@@ -140,7 +149,7 @@ impl State {
     fn run(&self) {
         unsafe {
             let mut message = MSG::default();
-            while GetMessageW(&mut message, HWND(0), 0, 0) == TRUE {
+            while GetMessageW(&mut message, HWND(0), 0, 0).as_bool() {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
@@ -160,6 +169,16 @@ impl WindowAdapter for State {
             }
             WM_USER => {
                 self.process_callbacks();
+            }
+            WM_HOTKEY => {
+                if let Some(delegate) = self
+                    .hot_key_delegate
+                    .borrow()
+                    .as_ref()
+                    .and_then(|d| d.upgrade())
+                {
+                    delegate.on_hot_key(w_param.0 as i32);
+                }
             }
             _ => {}
         }
@@ -181,6 +200,10 @@ impl PlatformRunLoop {
         self.state.unschedule(handle);
     }
 
+    pub(crate) fn hwnd(&self) -> HWND {
+        self.state.hwnd.get()
+    }
+
     #[must_use]
     pub fn schedule<F>(&self, in_time: Duration, callback: F) -> HandleType
     where
@@ -200,8 +223,13 @@ impl PlatformRunLoop {
     pub fn new_sender(&self) -> PlatformRunLoopSender {
         self.state.new_sender()
     }
+
+    pub(crate) fn set_hot_key_delegate(&self, delegate: Weak<dyn PlatformRunLoopHotKeyDelegate>) {
+        self.state.hot_key_delegate.borrow_mut().replace(delegate);
+    }
 }
 
+#[derive(Clone)]
 pub struct PlatformRunLoopSender {
     hwnd: HWND,
     callbacks: Arc<Mutex<Vec<SenderCallback>>>,

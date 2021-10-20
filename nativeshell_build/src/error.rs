@@ -6,8 +6,11 @@ pub enum FileOperation {
     Copy,
     Move,
     Remove,
+    RemoveDir,
     Read,
     Write,
+    Open,
+    Create,
     SymLink,
     MetaData,
     CopyDir,
@@ -15,15 +18,21 @@ pub enum FileOperation {
     ReadDir,
     Canonicalize,
     Command,
+    Unarchive,
 }
 #[derive(Debug)]
 pub enum BuildError {
-    FlutterToolError {
+    ToolError {
         command: String,
         status: ExitStatus,
         stderr: String,
         stdout: String,
     },
+    FlutterNotFoundError,
+    FlutterPathInvalidError {
+        path: PathBuf,
+    },
+    FlutterLocalEngineNotFound,
     FileOperationError {
         operation: FileOperation,
         path: PathBuf,
@@ -34,6 +43,9 @@ pub enum BuildError {
         text: Option<String>,
         source: serde_json::Error,
     },
+    YamlError {
+        source: yaml_rust::ScanError,
+    },
     OtherError(String),
 }
 
@@ -42,7 +54,7 @@ pub type BuildResult<T> = Result<T, BuildError>;
 impl Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            BuildError::FlutterToolError {
+            BuildError::ToolError {
                 command,
                 status,
                 stderr,
@@ -50,7 +62,7 @@ impl Display for BuildError {
             } => {
                 write!(
                     f,
-                    "Flutter Tool Failed!\nStatus: {:?}\nCommand: {:?}\nStderr:\n{}\nStdout:\n{}",
+                    "External Tool Failed!\nStatus: {:?}\nCommand: {}\nStderr:\n{}\nStdout:\n{}",
                     status, command, stderr, stdout
                 )
             }
@@ -82,8 +94,34 @@ impl Display for BuildError {
                 }
                 Ok(())
             }
+            BuildError::YamlError { source } => {
+                write!(f, "{}", source)
+            }
             BuildError::OtherError(err) => {
                 write!(f, "{}", err)
+            }
+            BuildError::FlutterNotFoundError => {
+                write!(
+                    f,
+                    "Couldn't find Flutter installation. \
+                    Plase make sure 'flutter' executable is in PATH \
+                    or specify 'flutter_path' in FlutterOptions"
+                )
+            }
+            BuildError::FlutterPathInvalidError { path } => {
+                write!(
+                    f,
+                    "Flutter path {:?} does not point to a valid flutter installation",
+                    path
+                )
+            }
+            BuildError::FlutterLocalEngineNotFound => {
+                write!(
+                    f,
+                    "Could not find path for local Flutter engine. Either specify a valid \
+                        'local_engine_src_path', or make sure that engine project exists \
+                        alongside the Flutter project."
+                )
             }
         }
     }

@@ -131,16 +131,8 @@ impl DataUtil {
     pub fn get_data(object: IDataObject, format: u32) -> windows::Result<Vec<u8>> {
         let mut format = Self::get_format(format);
 
-        let mut medium = STGMEDIUM {
-            tymed: 0,
-            Anonymous: STGMEDIUM_0 { hGlobal: 0 },
-            pUnkForRelease: None,
-        };
-
         unsafe {
-            object
-                .GetData(&mut format as *mut _, &mut medium as *mut STGMEDIUM)
-                .ok()?;
+            let mut medium = object.GetData(&mut format as *mut _)?;
 
             let size = GlobalSize(medium.Anonymous.hGlobal);
             let data = GlobalLock(medium.Anonymous.hGlobal);
@@ -165,7 +157,7 @@ impl DataUtil {
         let files: &DROPFILES = unsafe { &*(buffer.as_ptr() as *const DROPFILES) };
 
         let mut res = Vec::new();
-        if { files.fWide } == TRUE {
+        if { files.fWide }.as_bool() {
             let data = buffer.as_slice()[files.pFiles as usize..]
                 .as_slice_of::<u16>()
                 .unwrap();
@@ -201,7 +193,7 @@ impl DataUtil {
     }
 
     pub fn extract_url(buffer: &[u8]) -> String {
-        let str = CStr::from_bytes_with_nul(&buffer).unwrap();
+        let str = CStr::from_bytes_with_nul(buffer).unwrap();
         str.to_string_lossy().into()
     }
 
@@ -211,8 +203,8 @@ impl DataUtil {
         let drop_files = DROPFILES {
             pFiles: size_of::<DROPFILES>() as u32,
             pt: POINT { x: 0, y: 0 },
-            fNC: FALSE,
-            fWide: TRUE,
+            fNC: false.into(),
+            fWide: true.into(),
         };
 
         let drop_files = unsafe { as_u8_slice(&drop_files) };

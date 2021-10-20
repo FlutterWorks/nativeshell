@@ -24,7 +24,7 @@ pub struct PlatformWindow {}
 #[allow(unused_variables)]
 impl PlatformWindow {
     pub fn new(
-        context: Rc<Context>,
+        context: Context,
         delegate: Weak<dyn PlatformWindowDelegate>,
         parent: Option<Rc<PlatformWindow>>,
     ) -> Self {
@@ -57,6 +57,10 @@ impl PlatformWindow {
         Err(PlatformError::NotImplemented)
     }
 
+    pub fn activate(&self) -> PlatformResult<bool> {
+        Err(PlatformError::NotImplemented)
+    }
+
     pub fn show_modal<F>(&self, done_callback: F)
     where
         F: FnOnce(PlatformResult<Value>) + 'static,
@@ -81,6 +85,14 @@ impl PlatformWindow {
 
     pub fn set_title(&self, title: String) -> PlatformResult<()> {
         Err(PlatformError::NotImplemented)
+    }
+
+    pub fn save_position_to_string(&self) -> PlatformResult<String> {
+        Ok(String::new())
+    }
+
+    pub fn restore_position_from_string(&self, position: String) -> PlatformResult<()> {
+        Ok(())
     }
 
     pub fn set_style(&self, style: WindowStyle) -> PlatformResult<()> {

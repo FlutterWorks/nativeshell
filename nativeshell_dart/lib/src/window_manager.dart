@@ -1,11 +1,15 @@
 import 'package:flutter/widgets.dart';
+import 'dart:io';
 
 import 'key_interceptor.dart';
 import 'api_constants.dart';
 import 'drag_drop.dart';
 import 'event.dart';
+import 'util.dart';
 import 'window.dart';
 import 'window_method_channel.dart';
+import 'keyboard_map_internal.dart';
+import 'window_widget.dart';
 
 // Do not use directly. Access windows through Window.of(context) or through
 // WindowState.window.
@@ -39,6 +43,8 @@ class WindowManager {
 
     await _checkApiVersion(dispatcher);
 
+    await KeyboardMapManager.instance.init();
+
     final result = await dispatcher.invokeMethod(
         channel: Channels.windowManager,
         method: Methods.windowManagerInitWindow,
@@ -63,7 +69,13 @@ class WindowManager {
     dispatcher.registerMethodHandler(Channels.dropTarget, _onDropTargetCall);
   }
 
-  Future<Window> createWindow(dynamic initData) async {
+  Future<Window> createWindow(
+    dynamic initData, {
+    required bool invisibleWindowHint,
+  }) async {
+    if (!invisibleWindowHint) {
+      _maybePause();
+    }
     final dispatcher = WindowMethodDispatcher.instance;
     final result = await dispatcher.invokeMethod(
         channel: Channels.windowManager,
@@ -76,6 +88,9 @@ class WindowManager {
     final handle = WindowHandle(result['windowHandle'] as int);
     final res = _windows.putIfAbsent(handle, () => Window(handle));
     await res.waitUntilInitialized();
+    if (!invisibleWindowHint) {
+      _maybeResume();
+    }
     return res;
   }
 
@@ -90,6 +105,10 @@ class WindowManager {
 
   Window? getWindow(WindowHandle handle) => _windows[handle];
 
+  void haveWindowState(WindowState state) {
+    (currentWindow as _LocalWindow)._currentState = state;
+  }
+
   void _onMessage(WindowMessage message) {
     var window = _windows[message.sourceWindowHandle];
     if (window == null) {
@@ -103,7 +122,7 @@ class WindowManager {
   Future<dynamic> _onDropTargetCall(WindowMethodCall call) async {
     final window = _windows[call.targetWindowHandle];
     if (window is _LocalWindow) {
-      return window._dropTarget.onMethodCall(call);
+      return window._dragDriver.onMethodCall(call);
     } else {
       return null;
     }
@@ -112,10 +131,79 @@ class WindowManager {
   final windowAddedEvent = Event<Window>();
 }
 
-class _LocalWindow extends LocalWindow {
-  _LocalWindow(WindowHandle handle,
-      {WindowHandle? parentWindow, dynamic initData})
-      : super(handle, parentWindow: parentWindow, initData: initData);
+class _WindowDragDriver extends DragDriver {
+  Future<dynamic> onMethodCall(WindowMethodCall call) async {
+    if (call.method == Methods.dragDriverDraggingUpdated) {
+      final info = DragInfo.deserialize(call.arguments);
+      final res = await draggingUpdated(info);
+      return {
+        'effect': enumToString(res),
+      };
+    } else if (call.method == Methods.dragDriverDraggingExited) {
+      return draggingExited();
+    } else if (call.method == Methods.dragDriverPerformDrop) {
+      final info = DragInfo.deserialize(call.arguments);
+      return performDrop(info);
+    }
+  }
+}
 
-  final _dropTarget = DropTarget();
+class _LocalWindow extends LocalWindow {
+  _LocalWindow(
+    WindowHandle handle, {
+    WindowHandle? parentWindow,
+    dynamic initData,
+  }) : super(handle, parentWindow: parentWindow, initData: initData);
+
+  WindowState? _currentState;
+
+  final _dragDriver = _WindowDragDriver();
+
+  @override
+  Future<void> onCloseRequested() async {
+    if (_currentState != null) {
+      await _currentState!.windowCloseRequested();
+    } else {
+      await close();
+    }
+  }
+}
+
+int _pauseCount = 0;
+
+void _pushPause() {
+  ++_pauseCount;
+  if (_pauseCount > 0) {
+    WidgetsBinding.instance!
+        .handleAppLifecycleStateChanged(AppLifecycleState.paused);
+  }
+}
+
+void _popPause() {
+  assert(_pauseCount > 0);
+  --_pauseCount;
+  if (_pauseCount == 0) {
+    WidgetsBinding.instance!
+        .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+  }
+}
+
+// On Windows Angle has a big global lock which can get congested and causes
+// large delays when creating new window. As a workaround, we briefly pause
+// current isolate rasterization when creating window.
+bool _needPauseWhenCreatingWindow() {
+  return Platform.isWindows;
+}
+
+void _maybePause() {
+  if (_needPauseWhenCreatingWindow()) {
+    _pushPause();
+  }
+}
+
+void _maybeResume() async {
+  if (_needPauseWhenCreatingWindow()) {
+    await Future.delayed(Duration(milliseconds: 100));
+    _popPause();
+  }
 }

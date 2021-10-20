@@ -7,6 +7,8 @@ class Channels {
   static final dragSource = '.window.drag-source';
 
   static final menuManager = 'nativeshell/menu-manager';
+  static final keyboardMapManager = 'nativeshell/keyboard-map-manager';
+  static final hotKeyManager = 'nativeshell/hot-key-manager';
 }
 
 class Events {
@@ -29,6 +31,7 @@ class Methods {
   static final windowShowModal = 'Window.showModal';
   static final windowReadyToShow = 'Window.readyToShow';
   static final windowHide = 'Window.hide';
+  static final windowActivate = 'Window.activate';
   static final windowClose = 'Window.close';
   static final windowCloseWithResult = 'Window.closeWithResult';
 
@@ -45,10 +48,14 @@ class Methods {
   static final windowShowSystemMenu = 'Window.showSystemMenu';
   static final windowSetWindowMenu = 'Window.setWindowMenu';
 
-  // Drop Target
-  static final dropTargetDraggingUpdated = 'DropTarget.draggingUpdated';
-  static final dropTargetDraggingExited = 'DropTarget.draggingExited';
-  static final dropTargetPerformDrop = 'DropTarget.performDrop';
+  static final windowSavePositionToString = 'Window.savePositionToString';
+  static final windowRestorePositionFromString =
+      'Window.restorePositionFromString';
+
+  // Drag Driver
+  static final dragDriverDraggingUpdated = 'DragDriver.draggingUpdated';
+  static final dragDriverDraggingExited = 'DragDriver.draggingExited';
+  static final dragDriverPerformDrop = 'DragDriver.performDrop';
 
   // Drop Source
   static final dragSourceBeginDragSession = 'DragSource.beginDragSession';
@@ -58,11 +65,21 @@ class Methods {
   static final menuCreateOrUpdate = 'Menu.createOrUpdate';
   static final menuDestroy = 'Menu.destroy';
   static final menuOnAction = 'Menu.onAction';
+  static final menuOnOpen = 'Menu.onOpen';
   static final menuSetAppMenu = 'Menu.setAppMenu';
 
   // Menubar
   static final menubarMoveToPreviousMenu = 'Menubar.moveToPreviousMenu';
   static final menubarMoveToNextMenu = 'Menubar.moveToNextMenu';
+
+  // KeyboardMap
+  static final keyboardMapGet = 'KeyboardMap.get';
+  static final keyboardMapOnChanged = 'KeyboardMap.onChanged';
+
+  // HotKey
+  static final hotKeyCreate = 'HotKey.create';
+  static final hotKeyDestroy = 'HotKey.destroy';
+  static final hotKeyOnPressed = 'HotKey.onPressed';
 }
 
 class Keys {

@@ -1,14 +1,16 @@
+use super::{all_bindings::*, util::direct_composition_supported};
+use lazy_static::lazy_static;
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
 };
 
-use super::{all_bindings::*, util::direct_composition_supported};
-
 struct Global {
     window_class: RefCell<Weak<WindowClass>>,
 }
 
+// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
+unsafe impl Send for Global {}
 unsafe impl Sync for Global {}
 
 lazy_static! {
@@ -44,7 +46,7 @@ impl WindowClass {
 
     fn register(&mut self) {
         unsafe {
-            let mut class_name: Param<PWSTR> = self.class_name.clone().into_param();
+            let class_name: Param<PWSTR> = self.class_name.clone().into_param();
             let class = WNDCLASSW {
                 style: CS_HREDRAW | CS_VREDRAW,
                 lpfnWndProc: Some(wnd_proc),

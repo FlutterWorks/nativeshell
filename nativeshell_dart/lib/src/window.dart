@@ -1,11 +1,11 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pedantic/pedantic.dart';
 
 import 'api_model.dart';
+import 'api_model_internal.dart';
 import 'event.dart';
 import 'menu.dart';
 import 'util.dart';
@@ -60,6 +60,10 @@ class Window {
     await _invokeMethod(Methods.windowHide);
   }
 
+  Future<bool> activate() async {
+    return await _invokeMethod(Methods.windowActivate);
+  }
+
   Future<GeometryFlags> setGeometry(Geometry request,
       [GeometryPreference preference =
           GeometryPreference.preferContent]) async {
@@ -87,8 +91,15 @@ class Window {
     return _invokeMethod(Methods.windowSetStyle, style.serialize());
   }
 
-  static LocalWindow of(BuildContext context) =>
-      WindowState.of(context).window;
+  Future<String> savePositionToString() async {
+    return await _invokeMethod(Methods.windowSavePositionToString);
+  }
+
+  Future<void> restorePositionFromString(String position) async {
+    return _invokeMethod(Methods.windowRestorePositionFromString, position);
+  }
+
+  static LocalWindow of(BuildContext context) => WindowState.of(context).window;
 
   static LocalWindow? maybeOf(BuildContext context) =>
       WindowState.maybeOf(context)?.window;
@@ -97,8 +108,14 @@ class Window {
     return WindowManager.instance.getWindow(handle);
   }
 
-  static Future<Window> create(dynamic initData) {
-    return WindowManager.instance.createWindow(initData);
+  static Future<Window> create(
+    dynamic initData, {
+    // Hint to window manager to not optimize for faster display of this window
+    // at the expense of current window.
+    bool invisibleWindowHint = false,
+  }) {
+    return WindowManager.instance
+        .createWindow(initData, invisibleWindowHint: invisibleWindowHint);
   }
 
   final visibilityChangedEvent = Event<bool>();
@@ -152,7 +169,7 @@ class Window {
 }
 
 // Window that belongs to current isolate
-class LocalWindow extends Window {
+abstract class LocalWindow extends Window {
   LocalWindow(
     WindowHandle handle, {
     WindowHandle? parentWindow,
@@ -163,7 +180,7 @@ class LocalWindow extends Window {
   @override
   void onMessage(String message, dynamic arguments) {
     if (message == Events.windowCloseRequest) {
-      close();
+      onCloseRequested();
     }
     super.onMessage(message, arguments);
   }
@@ -178,6 +195,8 @@ class LocalWindow extends Window {
   Future<void> readyToShow() async {
     await _invokeMethod(Methods.windowReadyToShow);
   }
+
+  Future<void> onCloseRequested();
 
   Future<PopupMenuResponse> showPopupMenu(
     Menu menu,

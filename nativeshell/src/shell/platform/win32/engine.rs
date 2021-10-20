@@ -1,23 +1,29 @@
-use std::{mem::size_of, ptr};
-
-use crate::shell::platform::key_interceptor::override_key_event;
+use std::{ffi::CString, ptr};
 
 use super::{
     binary_messenger::PlatformBinaryMessenger,
     error::PlatformResult,
     flutter_sys::{
         FlutterDesktopEngineCreate, FlutterDesktopEngineDestroy, FlutterDesktopEngineGetMessenger,
-        FlutterDesktopEngineProperties, FlutterDesktopEngineRef,
+        FlutterDesktopEngineGetPluginRegistrar, FlutterDesktopEngineProperties,
+        FlutterDesktopEngineRef,
     },
     util::to_utf16,
 };
 
+pub type PlatformEngineType = FlutterDesktopEngineRef;
+
 pub struct PlatformEngine {
-    pub(super) handle: FlutterDesktopEngineRef,
+    pub(crate) handle: PlatformEngineType,
+}
+
+pub struct PlatformPlugin {
+    pub name: String,
+    pub register_func: Option<unsafe extern "C" fn(registrar: *mut std::os::raw::c_void)>,
 }
 
 impl PlatformEngine {
-    pub fn new() -> Self {
+    pub fn new(plugins: &[PlatformPlugin]) -> Self {
         let assets = to_utf16("data\\flutter_assets");
         let icu = to_utf16("data\\icudtl.dat");
         let aot = to_utf16("data\\app.so");
@@ -31,10 +37,16 @@ impl PlatformEngine {
 
         let engine = unsafe { FlutterDesktopEngineCreate(&properties) };
 
-        unsafe {
-            // TODO: This makes assumption about internal engine layout and will possibly
-            // break in future;
-            override_key_event((engine as *mut u8).add(2 * size_of::<isize>()) as *mut _);
+        // register plugins
+        for plugin in plugins {
+            let name = CString::new(plugin.name.as_str()).unwrap();
+            let registrar =
+                unsafe { FlutterDesktopEngineGetPluginRegistrar(engine, name.as_ptr()) };
+            if let Some(register_func) = plugin.register_func {
+                unsafe {
+                    register_func(registrar as *mut _);
+                }
+            }
         }
         Self { handle: engine }
     }

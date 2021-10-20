@@ -1,43 +1,43 @@
+use super::{
+    error::PlatformResult,
+    utils::{superclass, to_nsstring},
+};
+use crate::{
+    shell::{
+        api_model::{Accelerator, CheckStatus, Menu, MenuItem, MenuItemRole, MenuRole},
+        Context, Handle, MenuDelegate, MenuHandle, MenuManager,
+    },
+    util::{update_diff, DiffResult, LateRefCell},
+};
+use cocoa::{
+    appkit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem},
+    base::{id, nil, NO, YES},
+    foundation::{NSInteger, NSUInteger},
+};
+use lazy_static::lazy_static;
+use objc::{
+    class,
+    declare::ClassDecl,
+    msg_send,
+    rc::StrongPtr,
+    runtime::{Class, Object, Sel},
+    sel, sel_impl,
+};
 use std::{
     cell::RefCell,
     collections::HashMap,
     ffi::c_void,
     fmt::Write,
     hash::Hash,
+    mem::ManuallyDrop,
     rc::{Rc, Weak},
-};
-
-use cocoa::{
-    appkit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem},
-    base::{id, nil, NO, YES},
-    foundation::{NSInteger, NSUInteger},
-};
-use lazy_static::__Deref;
-use objc::{
-    declare::ClassDecl,
-    rc::StrongPtr,
-    runtime::{Class, Object, Sel},
-};
-
-use crate::{
-    shell::api_model::{Menu, MenuItem, MenuItemRole},
-    shell::{
-        api_model::{Accelerator, CheckStatus, MenuRole},
-        Context, MenuHandle, MenuManager, ScheduledCallback,
-    },
-    util::{update_diff, DiffResult, LateRefCell},
-};
-
-use super::{
-    error::PlatformResult,
-    utils::{superclass, to_nsstring},
 };
 
 struct StrongPtrWrapper(StrongPtr);
 
 impl PartialEq for StrongPtrWrapper {
     fn eq(&self, other: &Self) -> bool {
-        return self.0.deref() == other.0.deref();
+        *self.0 == *other.0
     }
 }
 
@@ -45,25 +45,31 @@ impl Eq for StrongPtrWrapper {}
 
 impl Hash for StrongPtrWrapper {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.deref().hash(state);
+        (*self.0).hash(state);
     }
 }
 
 pub struct PlatformMenuManager {
-    context: Rc<Context>,
+    context: Context,
+    weak_self: LateRefCell<Weak<PlatformMenuManager>>,
     app_menu: RefCell<Option<Rc<PlatformMenu>>>,
     window_menus: RefCell<HashMap<StrongPtrWrapper, Rc<PlatformMenu>>>,
-    update_handle: RefCell<Option<ScheduledCallback>>,
+    update_handle: RefCell<Option<Handle>>,
 }
 
 impl PlatformMenuManager {
-    pub fn new(context: Rc<Context>) -> Self {
+    pub fn new(context: Context) -> Self {
         Self {
             context,
+            weak_self: LateRefCell::new(),
             app_menu: RefCell::new(None),
             window_menus: RefCell::new(HashMap::new()),
             update_handle: RefCell::new(None),
         }
+    }
+
+    pub(crate) fn assign_weak_self(&self, weak_self: Weak<PlatformMenuManager>) {
+        self.weak_self.set(weak_self);
     }
 
     fn update_menu(&self) {
@@ -95,15 +101,15 @@ impl PlatformMenuManager {
     }
 
     fn schedule_update(&self) {
-        let context = self.context.clone();
-        let callback = self.context.run_loop.borrow().schedule_now(move || {
-            context
-                .menu_manager
-                .borrow()
-                .get_platform_menu_manager()
-                .update_menu();
-        });
-        self.update_handle.borrow_mut().replace(callback);
+        let weak_self = self.weak_self.borrow().clone();
+        if let Some(context) = self.context.get() {
+            let callback = context.run_loop.borrow().schedule_now(move || {
+                if let Some(s) = weak_self.upgrade() {
+                    s.update_menu();
+                }
+            });
+            self.update_handle.borrow_mut().replace(callback);
+        }
     }
 
     pub fn set_app_menu(&self, menu: Option<Rc<PlatformMenu>>) -> PlatformResult<()> {
@@ -139,45 +145,49 @@ impl PlatformMenuManager {
         self.window_menus
             .borrow_mut()
             .remove(&StrongPtrWrapper(window));
+        self.schedule_update();
     }
 
     pub fn window_did_become_active(&self, _window: StrongPtr) {
         self.schedule_update();
     }
-
-    pub fn window_did_resign_active(&self, _window: StrongPtr) {
-        self.schedule_update();
-    }
 }
 
 pub struct PlatformMenu {
-    context: Rc<Context>,
     handle: MenuHandle,
     pub(super) menu: StrongPtr,
     previous_menu: RefCell<Menu>,
     id_to_menu_item: RefCell<HashMap<i64, StrongPtr>>,
     target: StrongPtr,
     weak_self: LateRefCell<Weak<PlatformMenu>>,
+    delegate: Weak<RefCell<dyn MenuDelegate>>,
 }
 
 const ITEM_TAG: NSInteger = 9999;
 
 impl PlatformMenu {
-    pub fn new(context: Rc<Context>, handle: MenuHandle) -> Self {
+    pub fn new(
+        _context: Context,
+        handle: MenuHandle,
+        delegate: Weak<RefCell<dyn MenuDelegate>>,
+    ) -> Self {
         unsafe {
             let menu: id = NSMenu::alloc(nil).initWithTitle_(*to_nsstring(""));
             let () = msg_send![menu, setAutoenablesItems: NO];
 
             let target: id = msg_send![MENU_ITEM_TARGET_CLASS.0, new];
             let target = StrongPtr::new(target);
+
+            let () = msg_send![menu, setDelegate:*target];
+
             Self {
-                context,
                 handle,
                 menu: StrongPtr::new(menu),
                 previous_menu: RefCell::new(Default::default()),
                 id_to_menu_item: RefCell::new(HashMap::new()),
                 target,
                 weak_self: LateRefCell::new(),
+                delegate,
             }
         }
     }
@@ -185,7 +195,7 @@ impl PlatformMenu {
     pub fn assign_weak_self(&self, weak: Weak<PlatformMenu>) {
         self.weak_self.set(weak.clone());
         unsafe {
-            let state_ptr = Box::into_raw(Box::new(weak)) as *mut c_void;
+            let state_ptr = weak.into_raw() as *mut c_void;
             (**self.target).set_ivar("imState", state_ptr);
         }
     }
@@ -290,10 +300,13 @@ impl PlatformMenu {
             .iter()
             .filter_map(|f| f.submenu)
             .collect();
-        for c in children {
-            let menu = self.context.menu_manager.borrow().get_platform_menu(c);
-            if let Ok(menu) = menu {
-                menu.prepare_for_app_menu();
+
+        if let Some(delegate) = self.delegate.upgrade() {
+            for c in children {
+                let menu = delegate.borrow().get_platform_menu(c);
+                if let Ok(menu) = menu {
+                    menu.prepare_for_app_menu();
+                }
             }
         }
     }
@@ -403,10 +416,10 @@ impl PlatformMenu {
             "space" => 0x0020,
             "tab" => 0x0009,
             "enter" => 0x000d,
-            "up arrow" => 0xF700,
-            "down arrow" => 0xF701,
-            "left arrow" => 0xF702,
-            "right arrow" => 0xF703,
+            "arrow up" => 0xF700,
+            "arrow down" => 0xF701,
+            "arrow left" => 0xF702,
+            "arrow right" => 0xF703,
             _ => label.chars().next().unwrap_or(0 as char) as u32,
         };
         let mut res = String::new();
@@ -484,14 +497,19 @@ impl PlatformMenu {
     }
 
     fn menu_item_action(&self, item: id) {
-        let item_id = unsafe {
-            let object: id = msg_send![item, representedObject];
-            msg_send![object, longLongValue]
-        };
-        self.context
-            .menu_manager
-            .borrow()
-            .on_menu_action(self.handle, item_id);
+        if let Some(delegate) = self.delegate.upgrade() {
+            let item_id = unsafe {
+                let object: id = msg_send![item, representedObject];
+                msg_send![object, longLongValue]
+            };
+            delegate.borrow().on_menu_action(self.handle, item_id);
+        }
+    }
+
+    fn on_menu_will_open(&self) {
+        if let Some(delegate) = self.delegate.upgrade() {
+            delegate.borrow().on_menu_open(self.handle);
+        }
     }
 
     fn create_menu_item(&self, menu_item: &MenuItem, menu_manager: &MenuManager) -> StrongPtr {
@@ -514,6 +532,8 @@ impl PlatformMenu {
 }
 
 struct MenuItemTargetClass(*const Class);
+// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
+unsafe impl Send for MenuItemTargetClass {}
 unsafe impl Sync for MenuItemTargetClass {}
 
 lazy_static! {
@@ -529,17 +549,22 @@ lazy_static! {
             on_action as extern "C" fn(&Object, Sel, id),
         );
 
+        decl.add_method(
+            sel!(menuWillOpen:),
+            menu_will_open as extern "C" fn(&Object, Sel, id),
+        );
+
         MenuItemTargetClass(decl.register())
     };
 }
 
 extern "C" fn dealloc(this: &Object, _sel: Sel) {
-    let state_ptr = unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("imState");
-        &mut *(state_ptr as *mut Weak<PlatformMenu>)
-    };
     unsafe {
-        Box::from_raw(state_ptr);
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformMenu
+        };
+        Weak::from_raw(state_ptr);
 
         let superclass = superclass(this);
         let () = msg_send![super(this, superclass), dealloc];
@@ -547,13 +572,30 @@ extern "C" fn dealloc(this: &Object, _sel: Sel) {
 }
 
 extern "C" fn on_action(this: &Object, _sel: Sel, sender: id) {
-    let state_ptr = unsafe {
-        let state_ptr: *mut c_void = *this.get_ivar("imState");
-        &mut *(state_ptr as *mut Weak<PlatformMenu>)
+    let state = unsafe {
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformMenu
+        };
+        ManuallyDrop::new(Weak::from_raw(state_ptr))
     };
-    let upgraded = state_ptr.upgrade();
+    let upgraded = state.upgrade();
     if let Some(upgraded) = upgraded {
         upgraded.menu_item_action(sender);
+    }
+}
+
+extern "C" fn menu_will_open(this: &Object, _: Sel, _menu: id) {
+    let state = unsafe {
+        let state_ptr = {
+            let state_ptr: *mut c_void = *this.get_ivar("imState");
+            state_ptr as *const PlatformMenu
+        };
+        ManuallyDrop::new(Weak::from_raw(state_ptr))
+    };
+    let upgraded = state.upgrade();
+    if let Some(upgraded) = upgraded {
+        upgraded.on_menu_will_open();
     }
 }
 

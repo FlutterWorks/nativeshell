@@ -1,9 +1,6 @@
-use std::rc::Rc;
+use std::marker::PhantomData;
 
-use crate::{
-    shell::{BinaryMessengerReply, Context, EngineHandle, EngineManager},
-    Error, Result,
-};
+use crate::shell::{BinaryMessengerReply, Context, ContextRef, EngineHandle, EngineManager};
 
 use super::MessageCodec;
 
@@ -11,13 +8,15 @@ pub struct MessageChannel<V>
 where
     V: 'static,
 {
-    context: Rc<Context>,
-    sender: MessageSender<V>,
+    context: Context,
+    channel_name: String,
+    engine_handle: EngineHandle,
+    _data: PhantomData<V>,
 }
 
 impl<V> MessageChannel<V> {
     pub fn new<F>(
-        context: Rc<Context>,
+        context: &ContextRef,
         engine_handle: EngineHandle,
         channel_name: &str,
         codec: &'static dyn MessageCodec<V>,
@@ -27,7 +26,7 @@ impl<V> MessageChannel<V> {
         F: Fn(V, MessageReply<V>) + 'static,
     {
         Self::new_with_engine_manager(
-            context.clone(),
+            context.weak(),
             engine_handle,
             channel_name,
             codec,
@@ -37,7 +36,7 @@ impl<V> MessageChannel<V> {
     }
 
     pub fn new_with_engine_manager<F>(
-        context: Rc<Context>,
+        context: Context,
         engine_handle: EngineHandle,
         channel_name: &str,
         codec: &'static dyn MessageCodec<V>,
@@ -48,13 +47,10 @@ impl<V> MessageChannel<V> {
         F: Fn(V, MessageReply<V>) + 'static,
     {
         let res = MessageChannel {
-            context: context.clone(),
-            sender: MessageSender {
-                context,
-                engine_handle,
-                channel_name: channel_name.into(),
-                codec,
-            },
+            context,
+            channel_name: channel_name.into(),
+            engine_handle,
+            _data: PhantomData {},
         };
 
         let engine = engine_manager.get_engine(engine_handle);
@@ -69,60 +65,6 @@ impl<V> MessageChannel<V> {
                 });
         }
         res
-    }
-
-    pub fn sender(&self) -> &MessageSender<V> {
-        &self.sender
-    }
-}
-
-//
-//
-//
-
-#[derive(Clone)]
-pub struct MessageSender<V>
-where
-    V: 'static,
-{
-    context: Rc<Context>,
-    engine_handle: EngineHandle,
-    channel_name: String,
-    codec: &'static dyn MessageCodec<V>,
-}
-
-impl<V> MessageSender<V> {
-    pub fn send_message<F>(&self, message: &V, reply: F) -> Result<()>
-    where
-        F: FnOnce(V) + 'static,
-    {
-        let encoded = self.codec.encode_message(message);
-        let engine_manager = self.context.engine_manager.borrow();
-        let engine = engine_manager.get_engine(self.engine_handle);
-        if let Some(engine) = engine {
-            let codec = self.codec;
-            engine
-                .binary_messenger()
-                .send_message(&self.channel_name, &encoded, move |message| {
-                    let message = codec.decode_message(message).unwrap();
-                    reply(message);
-                })
-        } else {
-            Err(Error::InvalidEngineHandle)
-        }
-    }
-
-    pub fn post_message(&self, message: &V) -> Result<()> {
-        let encoded = self.codec.encode_message(message);
-        let engine_manager = self.context.engine_manager.borrow();
-        let engine = engine_manager.get_engine(self.engine_handle);
-        if let Some(engine) = engine {
-            engine
-                .binary_messenger()
-                .post_message(&self.channel_name, &encoded)
-        } else {
-            Err(Error::InvalidEngineHandle)
-        }
     }
 }
 
@@ -147,12 +89,14 @@ impl<V> MessageReply<V> {
 
 impl<V> Drop for MessageChannel<V> {
     fn drop(&mut self) {
-        let engine_manager = self.context.engine_manager.borrow();
-        let engine = engine_manager.get_engine(self.sender.engine_handle);
-        if let Some(engine) = engine {
-            engine
-                .binary_messenger()
-                .unregister_channel_handler(&self.sender.channel_name);
+        if let Some(context) = self.context.get() {
+            let engine_manager = context.engine_manager.borrow();
+            let engine = engine_manager.get_engine(self.engine_handle);
+            if let Some(engine) = engine {
+                engine
+                    .binary_messenger()
+                    .unregister_channel_handler(&self.channel_name);
+            }
         }
     }
 }
