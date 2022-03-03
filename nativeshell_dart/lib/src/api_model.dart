@@ -182,8 +182,13 @@ class GeometryFlags {
 }
 
 enum WindowFrame {
+  /// Normal window frame (includes title and can be resizable).
   regular,
+
+  /// Window frame without title (can be resizable).
   noTitle,
+
+  /// No window frame, can not be resizable.
   noFrame,
 }
 
@@ -195,6 +200,8 @@ class WindowStyle {
     this.canMinimize = true,
     this.canMaximize = true,
     this.canFullScreen = true,
+    this.alwaysOnTop = false,
+    this.alwaysOnTopLevel,
     this.trafficLightOffset,
   });
 
@@ -205,9 +212,25 @@ class WindowStyle {
   final bool canMinimize;
   final bool canMaximize; // ignored on mac
   final bool canFullScreen;
+  final bool alwaysOnTop;
 
-  // macOS only and only applicable for WindowFrame.noTitle;
-  // Controls the offset of window traffic light.
+  /// macOS only, corresponds to NSWindowLevel / CGWindowLevel
+  /// - 0 - normal window
+  /// - 3 - floating window, torn off menu
+  /// - 8 - modal panel
+  /// - 19 - utility window
+  /// - 20 - dock window
+  /// - 24 - main menu
+  /// - 25 - status window
+  /// - 101 - popup menu
+  /// - 102 - overlay window
+  /// - 200 - help window
+  /// - 500 - dragging window
+  /// - 1000 - screen saver
+  final int? alwaysOnTopLevel;
+
+  /// macOS only and only applicable for WindowFrame.noTitle;
+  /// Controls the offset of window traffic light.
   final Offset? trafficLightOffset;
 
   dynamic serialize() => {
@@ -217,6 +240,8 @@ class WindowStyle {
         'canMinimize': canMinimize,
         'canMaximize': canMaximize,
         'canFullScreen': canFullScreen,
+        'alwaysOnTop': alwaysOnTop,
+        'alwaysOnTopLevel': alwaysOnTopLevel,
         'trafficLightOffset': trafficLightOffset?.serialize(),
       };
 
@@ -229,8 +254,116 @@ class WindowStyle {
         canClose: map['canClose'],
         canMinimize: map['canMinimize'],
         canMaximize: map['canMaximize'],
-        canFullScreen: map['canFullScreen']);
+        canFullScreen: map['canFullScreen'],
+        alwaysOnTop: map['alwaysOnTop'],
+        alwaysOnTopLevel: map['alwaysOnTopLevel'],
+        trafficLightOffset:
+            OffsetExt.maybeDeserialize(map['trafficLightOffset']));
   }
+
+  @override
+  String toString() {
+    return serialize().toString();
+  }
+}
+
+// MacOS specific;
+class WindowCollectionBehavior {
+  final bool canJoinAllSpaces;
+  final bool moveToActiveSpace;
+  final bool managed;
+  final bool transient;
+  final bool stationary;
+  final bool participatesInCycle;
+  final bool ignoresCycle;
+  final bool fullScreenPrimary;
+  final bool fullScreenAuxiliary;
+  final bool fullScreenNone;
+  final bool allowsTiling;
+  final bool disallowsTiling;
+
+  WindowCollectionBehavior({
+    this.canJoinAllSpaces = false,
+    this.moveToActiveSpace = false,
+    this.managed = false,
+    this.transient = false,
+    this.stationary = false,
+    this.participatesInCycle = false,
+    this.ignoresCycle = false,
+    this.fullScreenPrimary = false,
+    this.fullScreenAuxiliary = false,
+    this.fullScreenNone = false,
+    this.allowsTiling = false,
+    this.disallowsTiling = false,
+  });
+
+  dynamic serialize() => {
+        'canJoinAllSpaces': canJoinAllSpaces,
+        'moveToActiveSpace': moveToActiveSpace,
+        'managed': managed,
+        'transient': transient,
+        'stationary': stationary,
+        'participatesInCycle': participatesInCycle,
+        'ignoresCycle': ignoresCycle,
+        'fullScreenPrimary': fullScreenPrimary,
+        'fullScreenAuxiliary': fullScreenAuxiliary,
+        'fullScreenNone': fullScreenNone,
+        'allowsTiling': allowsTiling,
+        'disallowsTiling': disallowsTiling,
+      };
+}
+
+enum BoolTransition {
+  no,
+  noToYes,
+  yes,
+  yesToNo,
+}
+
+class WindowStateFlags {
+  bool get maximized =>
+      maximizedTransition == BoolTransition.yes ||
+      maximizedTransition == BoolTransition.noToYes;
+
+  bool get minimized =>
+      minimizedTransition == BoolTransition.yes ||
+      minimizedTransition == BoolTransition.noToYes;
+
+  bool get fullScreen =>
+      fullScreenTransition == BoolTransition.yes ||
+      fullScreenTransition == BoolTransition.noToYes;
+
+  final bool active;
+
+  final BoolTransition maximizedTransition;
+  final BoolTransition minimizedTransition;
+  final BoolTransition fullScreenTransition;
+
+  WindowStateFlags({
+    required this.maximizedTransition,
+    required this.minimizedTransition,
+    required this.fullScreenTransition,
+    required this.active,
+  });
+
+  static WindowStateFlags deserialize(dynamic value) {
+    final map = value as Map;
+    return WindowStateFlags(
+        maximizedTransition: enumFromString(
+            BoolTransition.values, map['maximized'], BoolTransition.no),
+        minimizedTransition: enumFromString(
+            BoolTransition.values, map['minimized'], BoolTransition.no),
+        fullScreenTransition: enumFromString(
+            BoolTransition.values, map['fullScreen'], BoolTransition.no),
+        active: map['active']);
+  }
+
+  dynamic serialize() => {
+        'maximized': enumToString(maximizedTransition),
+        'minimized': enumToString(minimizedTransition),
+        'fullScreen': enumToString(fullScreenTransition),
+        'active': active,
+      };
 
   @override
   String toString() {

@@ -1,22 +1,31 @@
 use core::slice;
-use std::{
-    ffi::{c_void, CStr},
-    mem::size_of,
-    ptr::null_mut,
-    u32,
-};
+use std::{ffi::CStr, mem::size_of, ptr::null_mut, u32};
 
 use widestring::WideCStr;
-use windows::Guid;
+use windows::{
+    core::GUID,
+    Win32::{
+        Foundation::POINT,
+        System::{
+            Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED, TYMED_HGLOBAL},
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::{
+                ReleaseStgMedium, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
+                DROPEFFECT_NONE,
+            },
+        },
+        UI::Shell::DROPFILES,
+    },
+};
 
-use crate::shell::api_model::{DragEffect, ImageData};
+use crate::shell::api_model::DragEffect;
 
-use super::{all_bindings::*, util::as_u8_slice};
+use super::util::as_u8_slice;
 
 use byte_slice_cast::*;
 
 #[allow(non_upper_case_globals)]
-pub const CLSID_DragDropHelper: Guid = Guid::from_values(
+pub const CLSID_DragDropHelper: GUID = GUID::from_values(
     0x4657278a,
     0x411b,
     0x11d2,
@@ -55,80 +64,10 @@ pub fn convert_drag_effects(effects: &[DragEffect]) -> u32 {
     res
 }
 
-pub fn create_dragimage_bitmap(image: &ImageData) -> HBITMAP {
-    let bitmap = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: image.width,
-            biHeight: image.height,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB as u32,
-            biSizeImage: (image.width * image.height * 4) as u32,
-            biXPelsPerMeter: 0,
-            biYPelsPerMeter: 0,
-            biClrUsed: 0,
-            biClrImportant: 0,
-        },
-        bmiColors: Default::default(),
-    };
-
-    unsafe {
-        let dc = GetDC(HWND(0));
-
-        let mut ptr = std::ptr::null_mut();
-
-        let bitmap = CreateDIBSection(
-            dc,
-            &bitmap as *const _,
-            DIB_RGB_COLORS,
-            &mut ptr as *mut *mut _ as *mut *mut c_void,
-            HANDLE(0),
-            0,
-        );
-
-        // Bitmap needs to be flipped and unpremultiplied
-
-        let dst_stride = (image.width * 4) as isize;
-        let ptr = ptr as *mut u8;
-        for y in 0..image.height as isize {
-            let src_line = image
-                .data
-                .as_ptr()
-                .offset((image.height as isize - y - 1) * image.bytes_per_row as isize);
-
-            let dst_line = ptr.offset(y * dst_stride);
-
-            for x in (0..dst_stride).step_by(4) {
-                let (r, g, b, a) = (
-                    *src_line.offset(x) as i32,
-                    *src_line.offset(x + 1) as i32,
-                    *src_line.offset(x + 2) as i32,
-                    *src_line.offset(x + 3) as i32,
-                );
-
-                let (r, g, b) = if a == 0 {
-                    (0, 0, 0)
-                } else {
-                    (r * 255 / a, g * 255 / a, b * 255 / a)
-                };
-                *dst_line.offset(x) = b as u8;
-                *dst_line.offset(x + 1) = g as u8;
-                *dst_line.offset(x + 2) = r as u8;
-                *dst_line.offset(x + 3) = a as u8;
-            }
-        }
-
-        ReleaseDC(HWND(0), dc);
-
-        bitmap
-    }
-}
-
 pub struct DataUtil {}
 
 impl DataUtil {
-    pub fn get_data(object: IDataObject, format: u32) -> windows::Result<Vec<u8>> {
+    pub fn get_data(object: IDataObject, format: u32) -> windows::core::Result<Vec<u8>> {
         let mut format = Self::get_format(format);
 
         unsafe {
@@ -163,7 +102,7 @@ impl DataUtil {
                 .unwrap();
             let mut offset = 0;
             loop {
-                let str = WideCStr::from_slice_with_nul(&data[offset..]).unwrap();
+                let str = WideCStr::from_slice_truncate(&data[offset..]).unwrap();
                 if str.is_empty() {
                     break;
                 }
@@ -188,7 +127,7 @@ impl DataUtil {
 
     pub fn extract_url_w(buffer: &[u8]) -> String {
         let data = buffer.as_slice_of::<u16>().unwrap();
-        let str = WideCStr::from_slice_with_nul(data).unwrap();
+        let str = WideCStr::from_slice_truncate(data).unwrap();
         str.to_string_lossy()
     }
 

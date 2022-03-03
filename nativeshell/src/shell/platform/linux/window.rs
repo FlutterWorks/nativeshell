@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use gdk::{Event, EventType, EventWindowState, WMDecoration, WMFunction};
+use gdk::{Display, Event, EventType, EventWindowState, WMDecoration, WMFunction};
 use glib::{Cast, ObjectExt};
 use gtk::{
     prelude::{ContainerExt, GtkWindowExt, OverlayExt, WidgetExt},
@@ -16,8 +16,9 @@ use crate::{
     codec::Value,
     shell::{
         api_model::{
-            DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse, WindowFrame,
-            WindowGeometry, WindowGeometryFlags, WindowGeometryRequest, WindowStyle,
+            BoolTransition, DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse,
+            WindowCollectionBehavior, WindowFrame, WindowGeometry, WindowGeometryFlags,
+            WindowGeometryRequest, WindowStateFlags, WindowStyle,
         },
         Context, PlatformWindowDelegate, Point, Size,
     },
@@ -30,6 +31,7 @@ use super::{
     error::{PlatformError, PlatformResult},
     flutter::View,
     menu::PlatformMenu,
+    screen_manager::PlatformScreenManager,
     size_widget::{create_size_widget, size_widget_set_min_size},
     utils::{get_session_type, synthetize_button_up, translate_event_to_window, SessionType},
     window_menu::WindowMenu,
@@ -37,12 +39,14 @@ use super::{
 
 pub type PlatformWindowType = gtk::Window;
 
-#[derive(serde::Deserialize, serde::Serialize, Debug, Default)]
+#[derive(serde::Deserialize, serde::Serialize, Debug, Default, PartialEq, Clone)]
 struct WindowState {
     width: i32,
     height: i32,
+    is_minimized: bool,
     is_maximized: bool,
-    is_fullscreen: bool,
+    is_full_screen: bool,
+    is_active: bool,
 }
 
 pub struct PlatformWindow {
@@ -174,7 +178,7 @@ impl PlatformWindow {
 
     fn on_size_allocate(&self) {
         let mut state = self.window_state.borrow_mut();
-        if !state.is_maximized && !state.is_fullscreen {
+        if !state.is_maximized && !state.is_full_screen {
             let size = self.window.size();
             state.width = size.0;
             state.height = size.1;
@@ -201,13 +205,26 @@ impl PlatformWindow {
     }
 
     fn on_window_state_changed(&self, state: &EventWindowState) {
-        let mut window_state = self.window_state.borrow_mut();
-        window_state.is_maximized = state
-            .new_window_state()
-            .contains(gdk::WindowState::MAXIMIZED);
-        window_state.is_fullscreen = state
-            .new_window_state()
-            .contains(gdk::WindowState::FULLSCREEN);
+        let state_flags_changed = {
+            let mut window_state = self.window_state.borrow_mut();
+            let prev_state = window_state.clone();
+            window_state.is_maximized = state
+                .new_window_state()
+                .contains(gdk::WindowState::MAXIMIZED);
+            window_state.is_full_screen = state
+                .new_window_state()
+                .contains(gdk::WindowState::FULLSCREEN);
+            window_state.is_minimized = state
+                .new_window_state()
+                .contains(gdk::WindowState::ICONIFIED);
+            window_state.is_active = state.new_window_state().contains(gdk::WindowState::FOCUSED);
+            *window_state != prev_state
+        };
+        if state_flags_changed {
+            if let Some(delegate) = self.delegate.upgrade() {
+                delegate.state_flags_changed();
+            }
+        }
     }
 
     fn connect_drag_drop_events(&self) {
@@ -383,9 +400,13 @@ impl PlatformWindow {
         Ok(())
     }
 
-    pub fn activate(&self) -> PlatformResult<bool> {
+    pub fn activate(&self, _activate_application: bool) -> PlatformResult<bool> {
         self.window.present();
         Ok(true)
+    }
+
+    pub fn deactivate(&self, _deactivate_application: bool) -> PlatformResult<bool> {
+        Ok(false)
     }
 
     pub fn ready_to_show(&self) -> PlatformResult<()> {
@@ -583,6 +604,77 @@ impl PlatformWindow {
         Ok(())
     }
 
+    pub fn set_collection_behavior(
+        &self,
+        _behavior: WindowCollectionBehavior,
+    ) -> PlatformResult<()> {
+        Err(PlatformError::NotAvailable)
+    }
+
+    pub fn set_minimized(&self, minimized: bool) -> PlatformResult<()> {
+        let is_minimized = self.window_state.borrow().is_minimized;
+        if minimized && !is_minimized {
+            self.window.iconify();
+        } else if !minimized && is_minimized {
+            self.window.deiconify();
+        }
+        Ok(())
+    }
+
+    pub fn set_maximized(&self, maximized: bool) -> PlatformResult<()> {
+        let is_maximized = self.window_state.borrow().is_maximized;
+        if maximized && !is_maximized {
+            self.window.maximize();
+        } else if !maximized && is_maximized {
+            self.window.unmaximize();
+        }
+        Ok(())
+    }
+
+    pub fn set_full_screen(&self, full_screen: bool) -> PlatformResult<()> {
+        let is_full_screen = self.window_state.borrow().is_full_screen;
+        if full_screen && !is_full_screen {
+            self.window.fullscreen();
+        } else if !full_screen && is_full_screen {
+            self.window.unfullscreen();
+        }
+        Ok(())
+    }
+
+    pub fn get_screen_id(&self) -> PlatformResult<i64> {
+        if let Some(display) = Display::default() {
+            let monitor = display.monitor_at_window(&self.window.window().unwrap());
+            Ok(monitor
+                .as_ref()
+                .map(PlatformScreenManager::get_monitor_id)
+                .unwrap_or(0))
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub fn get_window_state_flags(&self) -> PlatformResult<WindowStateFlags> {
+        let state = self.window_state.borrow();
+        Ok(WindowStateFlags {
+            maximized: if state.is_maximized {
+                BoolTransition::Yes
+            } else {
+                BoolTransition::No
+            },
+            minimized: if state.is_minimized {
+                BoolTransition::Yes
+            } else {
+                BoolTransition::No
+            },
+            full_screen: if state.is_full_screen {
+                BoolTransition::Yes
+            } else {
+                BoolTransition::No
+            },
+            active: state.is_active,
+        })
+    }
+
     pub fn save_position_to_string(&self) -> PlatformResult<String> {
         let state = self.window_state.borrow();
         Ok(serde_json::to_string(&*state).unwrap())
@@ -598,7 +690,7 @@ impl PlatformWindow {
         if state.is_maximized {
             self.window.maximize();
         }
-        if state.is_fullscreen {
+        if state.is_full_screen {
             self.window.fullscreen();
         }
 
@@ -647,6 +739,8 @@ impl PlatformWindow {
         }
 
         window.set_functions(func);
+
+        window.set_keep_above(style.always_on_top);
 
         Ok(())
     }
@@ -701,11 +795,11 @@ impl PlatformWindow {
     }
 
     pub fn show_system_menu(&self) -> PlatformResult<()> {
-        Err(PlatformError::NotImplemented)
+        Err(PlatformError::NotAvailable)
     }
 
     pub fn set_window_menu(&self, _menu: Option<Rc<PlatformMenu>>) -> PlatformResult<()> {
-        Err(PlatformError::NotImplemented)
+        Err(PlatformError::NotAvailable)
     }
 }
 

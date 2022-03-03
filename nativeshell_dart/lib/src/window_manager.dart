@@ -1,15 +1,18 @@
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'dart:io';
 
-import 'key_interceptor.dart';
 import 'api_constants.dart';
 import 'drag_drop.dart';
 import 'event.dart';
-import 'util.dart';
-import 'window.dart';
-import 'window_method_channel.dart';
+import 'key_interceptor.dart';
 import 'keyboard_map_internal.dart';
+import 'screen_internal.dart';
+import 'status_item_internal.dart';
+import 'util.dart';
+import 'window_method_channel.dart';
 import 'window_widget.dart';
+import 'window.dart';
 
 // Do not use directly. Access windows through Window.of(context) or through
 // WindowState.window.
@@ -44,6 +47,8 @@ class WindowManager {
     await _checkApiVersion(dispatcher);
 
     await KeyboardMapManager.instance.init();
+    await ScreenManager.instance.init();
+    await StatusItemManager.instance.init();
 
     final result = await dispatcher.invokeMethod(
         channel: Channels.windowManager,
@@ -157,6 +162,9 @@ class _LocalWindow extends LocalWindow {
 
   WindowState? _currentState;
 
+  bool _shown = false;
+  bool _paused = false;
+
   final _dragDriver = _WindowDragDriver();
 
   @override
@@ -167,6 +175,44 @@ class _LocalWindow extends LocalWindow {
       await close();
     }
   }
+
+  @override
+  Future<void> readyToShow() {
+    // ignore: unnecessary_non_null_assertion
+    SchedulerBinding.instance!.addPostFrameCallback((_) {
+      if (!_paused && !_shown) {
+        _pushPause();
+        _paused = true;
+      }
+    });
+
+    return super.readyToShow();
+  }
+
+  @override
+  Future<void> show() {
+    _shown = true;
+    if (_paused) {
+      _popPause();
+      _paused = false;
+    }
+    return super.show();
+  }
+
+  @override
+  Future<void> hide() {
+    _shown = false;
+    if (!_paused) {
+      _paused = true;
+      _pushPause();
+    }
+    return super.hide();
+  }
+
+  @override
+  void onMessage(String message, dynamic arguments) {
+    super.onMessage(message, arguments);
+  }
 }
 
 int _pauseCount = 0;
@@ -174,6 +220,7 @@ int _pauseCount = 0;
 void _pushPause() {
   ++_pauseCount;
   if (_pauseCount > 0) {
+    // ignore: unnecessary_non_null_assertion
     WidgetsBinding.instance!
         .handleAppLifecycleStateChanged(AppLifecycleState.paused);
   }
@@ -183,6 +230,7 @@ void _popPause() {
   assert(_pauseCount > 0);
   --_pauseCount;
   if (_pauseCount == 0) {
+    // ignore: unnecessary_non_null_assertion
     WidgetsBinding.instance!
         .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   }

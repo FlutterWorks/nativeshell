@@ -1,16 +1,25 @@
-use super::{all_bindings::*, flutter_sys::FlutterDesktopGetDpiForMonitor};
+use windows::Win32::{
+    Foundation::{BOOL, LPARAM, RECT},
+    Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    },
+};
+
+use super::flutter_sys::FlutterDesktopGetDpiForMonitor;
 use crate::shell::{IPoint, IRect, Point, Rect};
-use lazy_static::lazy_static;
 use std::{
-    cell::{Ref, RefCell},
+    cell::RefCell,
     cmp::{self, Ordering},
+    collections::HashMap,
+    intrinsics::transmute,
+    mem,
 };
 
 #[derive(Clone, Debug)]
 pub struct PhysicalDisplay {
     physical: IRect,
     scale: f64,
-    handle: isize,
+    handle: HMONITOR,
 }
 
 #[derive(Clone, Debug)]
@@ -18,9 +27,12 @@ pub struct Display {
     pub physical: IRect,
     pub logical: Rect,
     pub scale: f64,
-    pub handle: isize,
+    pub handle: HMONITOR,
+    pub work: Rect,
+    pub id: i64,
 }
 
+#[derive(Clone, Debug)]
 pub struct Displays {
     pub displays: Vec<Display>,
 }
@@ -35,16 +47,42 @@ impl Displays {
         let mut w = Work::new(&displays);
         w.perform();
         Self {
-            displays: w
-                .state
-                .iter()
-                .map(|d| Display {
-                    physical: d.original.physical.clone(),
-                    logical: d.adjusted_logical.clone(),
-                    scale: d.original.scale,
-                    handle: d.original.handle,
-                })
-                .collect(),
+            displays: w.state.iter().map(Self::display_for_state).collect(),
+        }
+    }
+
+    fn display_for_state(d: &DisplayState) -> Display {
+        let mut monitor_info_ex = MONITORINFOEXW::default();
+        let mut monitor_info: &mut MONITORINFO = unsafe { transmute(&mut monitor_info_ex) };
+        monitor_info.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+        unsafe { GetMonitorInfoW(d.original.handle, monitor_info as *mut _) };
+        // Only used as key in map, don't care about null termination
+        let name = String::from_utf16_lossy(&monitor_info_ex.szDevice);
+        let physical = d.original.physical.clone();
+        let logical = d.adjusted_logical.clone();
+        let scale = d.original.scale;
+        let work = Rect::xywh(
+            logical.x + (monitor_info.rcWork.left - physical.x) as f64 / scale,
+            logical.y + (monitor_info.rcWork.top - physical.y) as f64 / scale,
+            (monitor_info.rcWork.right - monitor_info.rcWork.left) as f64 / scale,
+            (monitor_info.rcWork.bottom - monitor_info.rcWork.top) as f64 / scale,
+        );
+        let id = AUX_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.name_to_id.contains_key(&name) {
+                let id = s.next_screen_id;
+                s.next_screen_id += 1;
+                s.name_to_id.insert(name.clone(), id);
+            }
+            *s.name_to_id.get(&name).unwrap()
+        });
+        Display {
+            physical,
+            logical,
+            scale,
+            handle: d.original.handle,
+            work,
+            id,
         }
     }
 
@@ -106,18 +144,31 @@ impl Displays {
         }
     }
 
-    pub fn get_displays() -> Ref<'static, Displays> {
-        if GLOBAL.displays.borrow().is_none() {
-            GLOBAL
-                .displays
-                .borrow_mut()
-                .replace(Displays::new(displays_from_system()));
-        }
-        Ref::map(GLOBAL.displays.borrow(), |d| d.as_ref().unwrap())
+    pub fn get_displays() -> Displays {
+        DISPLAYS.with(|displays| {
+            let mut displays = displays.borrow_mut();
+            if displays.is_none() {
+                displays.replace(Displays::new(displays_from_system()));
+            }
+            displays.as_ref().unwrap().clone()
+        })
+    }
+
+    pub fn on_displays_changed<F: Fn() + 'static>(f: F) {
+        AUX_STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            s.on_displays_changed.push(Box::new(f));
+        });
     }
 
     pub fn displays_changed() {
-        GLOBAL.displays.borrow_mut().take();
+        DISPLAYS.with(|displays| displays.borrow_mut().take());
+        AUX_STATE.with(|s| {
+            let s = s.borrow();
+            for c in &s.on_displays_changed {
+                c();
+            }
+        })
     }
 }
 
@@ -138,7 +189,7 @@ extern "system" fn enum_monitors(
                 rect.bottom - rect.top,
             ),
             scale: FlutterDesktopGetDpiForMonitor(hmonitor.0) as f64 / 96.0,
-            handle: hmonitor.0,
+            handle: hmonitor,
         });
     }
     true.into()
@@ -157,16 +208,25 @@ fn displays_from_system() -> Vec<PhysicalDisplay> {
     }
 }
 
-struct Global {
-    displays: RefCell<Option<Displays>>,
+thread_local! {
+    static DISPLAYS: RefCell<Option<Displays>> = RefCell::new(None);
+    static AUX_STATE: RefCell<AuxState> = RefCell::new(AuxState::new());
 }
 
-unsafe impl Sync for Global {}
+struct AuxState {
+    name_to_id: HashMap<String, i64>,
+    next_screen_id: i64,
+    on_displays_changed: Vec<Box<dyn Fn()>>,
+}
 
-lazy_static! {
-    static ref GLOBAL: Global = Global {
-        displays: RefCell::new(None),
-    };
+impl AuxState {
+    fn new() -> AuxState {
+        AuxState {
+            name_to_id: HashMap::new(),
+            next_screen_id: 1, // reserve 0 for invalid screen Id
+            on_displays_changed: Vec::new(),
+        }
+    }
 }
 
 struct DisplayState {
@@ -326,6 +386,8 @@ impl Work {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Graphics::Gdi::HMONITOR;
+
     use crate::shell::{IPoint, IRect, Point, Rect};
 
     use super::{Displays, PhysicalDisplay};
@@ -336,22 +398,22 @@ mod tests {
             PhysicalDisplay {
                 physical: IRect::xywh(0, 0, 1920, 1080),
                 scale: 2.0,
-                handle: 0,
+                handle: HMONITOR(0),
             },
             PhysicalDisplay {
                 physical: IRect::xywh(1920, 0, 1920, 1080),
                 scale: 1.0,
-                handle: 0,
+                handle: HMONITOR(0),
             },
             PhysicalDisplay {
                 physical: IRect::xywh(-1920, 0, 1920, 1080),
                 scale: 2.0,
-                handle: 0,
+                handle: HMONITOR(0),
             },
             PhysicalDisplay {
                 physical: IRect::xywh(-(1920 + 1024), 0, 1024, 1024),
                 scale: 1.0,
-                handle: 0,
+                handle: HMONITOR(0),
             },
         ];
 
@@ -404,12 +466,12 @@ mod tests {
             PhysicalDisplay {
                 physical: IRect::xywh(-3840, 14, 3840, 2160),
                 scale: 2.0,
-                handle: 0,
+                handle: HMONITOR(0),
             },
             PhysicalDisplay {
                 physical: IRect::xywh(0, 0, 1920, 1080),
                 scale: 1.25,
-                handle: 0,
+                handle: HMONITOR(0),
             },
         ];
         let displays = Displays::new(d);

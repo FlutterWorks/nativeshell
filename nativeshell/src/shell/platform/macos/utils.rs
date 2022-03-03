@@ -1,6 +1,6 @@
 use crate::shell::{api_model::ImageData, Point, Rect, Size};
 use cocoa::{
-    appkit::{NSImage, NSView},
+    appkit::{NSImage, NSScreen, NSView},
     base::{id, nil},
     foundation::{NSArray, NSPoint, NSRect, NSSize, NSString},
 };
@@ -14,7 +14,7 @@ use objc::{
     class,
     declare::ClassDecl,
     msg_send,
-    rc::StrongPtr,
+    rc::{autoreleasepool, StrongPtr},
     runtime::{objc_getClass, Class, Object},
     sel, sel_impl,
 };
@@ -85,16 +85,14 @@ impl From<NSRect> for Rect {
     }
 }
 
-pub fn from_nsstring(ns_string: id) -> String {
-    unsafe {
-        let bytes: *const c_char = msg_send![ns_string, UTF8String];
-        let bytes = bytes as *const u8;
+pub unsafe fn from_nsstring(ns_string: id) -> String {
+    let bytes: *const c_char = msg_send![ns_string, UTF8String];
+    let bytes = bytes as *const u8;
 
-        let len = ns_string.len();
+    let len = ns_string.len();
 
-        let bytes = slice::from_raw_parts(bytes, len);
-        std::str::from_utf8(bytes).unwrap().into()
-    }
+    let bytes = slice::from_raw_parts(bytes, len);
+    std::str::from_utf8(bytes).unwrap().into()
 }
 
 pub fn to_nsstring(string: &str) -> StrongPtr {
@@ -112,6 +110,19 @@ pub fn to_nsstring(string: &str) -> StrongPtr {
 //         data.into()
 //     }
 // }
+
+pub fn global_screen_frame() -> Rect {
+    let mut res = Rect::default();
+    autoreleasepool(|| unsafe {
+        let screens = NSScreen::screens(nil);
+        for i in 0..NSArray::count(screens) {
+            let screen = NSArray::objectAtIndex(screens, i);
+            let screen_frame: Rect = NSScreen::frame(screen).into();
+            res = Rect::union(&res, &screen_frame);
+        }
+    });
+    res
+}
 
 pub fn to_nsdata(data: &[u8]) -> StrongPtr {
     unsafe {
@@ -171,22 +182,21 @@ pub(super) fn class_decl_from_name(name: &str) -> ManuallyDrop<ClassDecl> {
     ManuallyDrop::new(unsafe { std::mem::transmute(res) })
 }
 
-pub(super) fn class_from_string(name: &str) -> *mut Class {
+pub(super) fn class_from_string(name: &str) -> *const Class {
     let name = CString::new(name).unwrap();
-    unsafe { objc_getClass(name.as_ptr() as *const _) as *mut _ }
+    unsafe { objc_getClass(name.as_ptr() as *const _) }
 }
 
-pub(super) fn flip_position(view: id, position: &mut NSPoint) {
-    let flipped: bool = unsafe { msg_send![view, isFlipped] };
+pub(super) unsafe fn flip_position(view: id, position: &mut NSPoint) {
+    let flipped: bool = msg_send![view, isFlipped];
     if !flipped {
-        position.y = unsafe { NSView::bounds(view) }.size.height - position.y;
+        position.y = NSView::bounds(view).size.height - position.y;
     }
 }
 
-pub(super) fn flip_rect(view: id, rect: &mut NSRect) {
-    let flipped: bool = unsafe { msg_send![view, isFlipped] };
+pub(super) unsafe fn flip_rect(view: id, rect: &mut NSRect) {
+    let flipped: bool = msg_send![view, isFlipped];
     if !flipped {
-        rect.origin.y =
-            unsafe { NSView::bounds(view) }.size.height - rect.size.height - rect.origin.y;
+        rect.origin.y = NSView::bounds(view).size.height - rect.size.height - rect.origin.y;
     }
 }

@@ -5,6 +5,7 @@ use super::{
 use crate::{
     shell::{
         api_model::{Accelerator, CheckStatus, Menu, MenuItem, MenuItemRole, MenuRole},
+        platform::platform_impl::utils::from_nsstring,
         Context, Handle, MenuDelegate, MenuHandle, MenuManager,
     },
     util::{update_diff, DiffResult, LateRefCell},
@@ -14,7 +15,6 @@ use cocoa::{
     base::{id, nil, NO, YES},
     foundation::{NSInteger, NSUInteger},
 };
-use lazy_static::lazy_static;
 use objc::{
     class,
     declare::ClassDecl,
@@ -23,6 +23,7 @@ use objc::{
     runtime::{Class, Object, Sel},
     sel, sel_impl,
 };
+use once_cell::sync::Lazy;
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -55,6 +56,7 @@ pub struct PlatformMenuManager {
     app_menu: RefCell<Option<Rc<PlatformMenu>>>,
     window_menus: RefCell<HashMap<StrongPtrWrapper, Rc<PlatformMenu>>>,
     update_handle: RefCell<Option<Handle>>,
+    last_key_window: RefCell<StrongPtr>,
 }
 
 impl PlatformMenuManager {
@@ -65,6 +67,7 @@ impl PlatformMenuManager {
             app_menu: RefCell::new(None),
             window_menus: RefCell::new(HashMap::new()),
             update_handle: RefCell::new(None),
+            last_key_window: RefCell::new(unsafe { StrongPtr::new(nil) }),
         }
     }
 
@@ -72,13 +75,28 @@ impl PlatformMenuManager {
         self.weak_self.set(weak_self);
     }
 
+    unsafe fn key_window(&self) -> StrongPtr {
+        let app = NSApplication::sharedApplication(nil);
+        let mut key = StrongPtr::retain(msg_send![app, keyWindow]);
+        if *key != nil {
+            let key_class: id = msg_send![*key, className];
+            if from_nsstring(key_class) != "IMFlutterWindow" {
+                key = StrongPtr::new(nil);
+            }
+        }
+        if *key == nil {
+            key = self.last_key_window.borrow().clone();
+        }
+        self.last_key_window.replace(key.clone());
+        key
+    }
+
     fn update_menu(&self) {
         unsafe {
             let mut menu = self.app_menu.borrow().clone();
             let app = NSApplication::sharedApplication(nil);
-            let key: id = msg_send![app, keyWindow];
-            if key != nil {
-                let key = StrongPtr::retain(key);
+            let key = self.key_window();
+            if *key != nil {
                 menu = self
                     .window_menus
                     .borrow()
@@ -142,6 +160,9 @@ impl PlatformMenuManager {
     }
 
     pub fn window_will_close(&self, window: StrongPtr) {
+        if **self.last_key_window.borrow() == *window {
+            self.last_key_window.replace(unsafe { StrongPtr::new(nil) });
+        }
         self.window_menus
             .borrow_mut()
             .remove(&StrongPtrWrapper(window));
@@ -175,7 +196,7 @@ impl PlatformMenu {
             let menu: id = NSMenu::alloc(nil).initWithTitle_(*to_nsstring(""));
             let () = msg_send![menu, setAutoenablesItems: NO];
 
-            let target: id = msg_send![MENU_ITEM_TARGET_CLASS.0, new];
+            let target: id = msg_send![*MENU_ITEM_TARGET_CLASS, new];
             let target = StrongPtr::new(target);
 
             let () = msg_send![menu, setDelegate:*target];
@@ -203,16 +224,15 @@ impl PlatformMenu {
     pub fn update_from_menu(&self, menu: Menu, manager: &MenuManager) -> PlatformResult<()> {
         let mut previous_menu = self.previous_menu.borrow_mut();
 
-        let diff = update_diff(&previous_menu.items, &menu.items, |a, b| {
+        let mut diff = update_diff(&previous_menu.items, &menu.items, |a, b| {
             Self::can_update(a, b)
         });
 
         // First remove items from menu; This is necessary in case we're reordering a
         // item with submenu - we have to remove it first otherwise we get exception
         // if adding same submenu while it already exists
-        let diff: Vec<_> = diff
-            .iter()
-            .filter(|res| match res {
+        diff.retain(|res| {
+            match res {
                 DiffResult::Remove(res) => {
                     let item = self.id_to_menu_item.borrow_mut().remove(&res.id);
                     if let Some(item) = item {
@@ -225,8 +245,8 @@ impl PlatformMenu {
                     false
                 }
                 _ => true,
-            })
-            .collect();
+            }
+        });
 
         for (i, d) in diff.iter().enumerate() {
             match d {
@@ -345,6 +365,9 @@ impl PlatformMenu {
         let () = msg_send![item, setTitle:*to_nsstring(&remove_mnemonics(title))];
         let () = msg_send![item, setTarget: nil];
         match role {
+            MenuItemRole::About => {
+                let () = msg_send![item, setAction: sel!(orderFrontStandardAboutPanel:)];
+            }
             MenuItemRole::Hide => {
                 let () = msg_send![item, setAction: sel!(hide:)];
                 let () = msg_send![item, setKeyEquivalent: to_nsstring("h")];
@@ -531,32 +554,25 @@ impl PlatformMenu {
     }
 }
 
-struct MenuItemTargetClass(*const Class);
-// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
-unsafe impl Send for MenuItemTargetClass {}
-unsafe impl Sync for MenuItemTargetClass {}
+static MENU_ITEM_TARGET_CLASS: Lazy<&'static Class> = Lazy::new(|| unsafe {
+    let target_superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("IMMenuItemTarget", target_superclass).unwrap();
 
-lazy_static! {
-    static ref MENU_ITEM_TARGET_CLASS: MenuItemTargetClass = unsafe {
-        let target_superclass = class!(NSObject);
-        let mut decl = ClassDecl::new("IMMenuItemTarget", target_superclass).unwrap();
+    decl.add_ivar::<*mut c_void>("imState");
 
-        decl.add_ivar::<*mut c_void>("imState");
+    decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
+    decl.add_method(
+        sel!(onAction:),
+        on_action as extern "C" fn(&Object, Sel, id),
+    );
 
-        decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
-        decl.add_method(
-            sel!(onAction:),
-            on_action as extern "C" fn(&Object, Sel, id),
-        );
+    decl.add_method(
+        sel!(menuWillOpen:),
+        menu_will_open as extern "C" fn(&Object, Sel, id),
+    );
 
-        decl.add_method(
-            sel!(menuWillOpen:),
-            menu_will_open as extern "C" fn(&Object, Sel, id),
-        );
-
-        MenuItemTargetClass(decl.register())
-    };
-}
+    decl.register()
+});
 
 extern "C" fn dealloc(this: &Object, _sel: Sel) {
     unsafe {

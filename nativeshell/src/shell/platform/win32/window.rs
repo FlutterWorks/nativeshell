@@ -5,12 +5,28 @@ use std::{
     time::Duration,
 };
 
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+    UI::{
+        Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetFocus},
+        Shell::{DefSubclassProc, SetWindowSubclass},
+        WindowsAndMessaging::{
+            DefWindowProcW, EndMenu, GetClientRect, GetSystemMenu, MoveWindow, SendMessageW,
+            SetForegroundWindow, SetParent, TrackPopupMenuEx, GWL_HWNDPARENT, MSG, SIZE_MAXIMIZED,
+            SIZE_MINIMIZED, TPM_RETURNCMD, WA_ACTIVE, WA_CLICKACTIVE, WM_ACTIVATE,
+            WM_DISPLAYCHANGE, WM_EXITSIZEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_NCCALCSIZE,
+            WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETFOCUS, WM_SHOWWINDOW, WM_SIZE, WM_SYSCOMMAND,
+        },
+    },
+};
+
 use crate::{
     codec::Value,
     shell::{
         api_model::{
-            DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse, WindowGeometry,
-            WindowGeometryFlags, WindowGeometryRequest, WindowStyle,
+            BoolTransition, DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse,
+            WindowCollectionBehavior, WindowGeometry, WindowGeometryFlags, WindowGeometryRequest,
+            WindowStateFlags, WindowStyle,
         },
         Context, IPoint, PlatformWindowDelegate, Point,
     },
@@ -18,13 +34,13 @@ use crate::{
 };
 
 use super::{
-    all_bindings::*,
     drag_context::DragContext,
     dxgi_hook::{set_override_parent_hwnd, take_override_parent_hwnd},
     engine::PlatformEngine,
     error::{PlatformError, PlatformResult},
     flutter_sys::*,
     menu::PlatformMenu,
+    screen_manager::PlatformScreenManager,
     window_adapter::{SetWindowLongPtrW, WindowAdapter},
     window_base::{WindowBaseState, WindowDelegate},
     window_menu::{WindowMenu, WindowMenuDelegate},
@@ -48,6 +64,7 @@ pub struct PlatformWindow {
     ready_to_show: Cell<bool>,
     show_when_ready: Cell<bool>,
     mouse_state: RefCell<MouseState>,
+    window_state_flags: RefCell<WindowStateFlags>,
 }
 
 struct MouseState {
@@ -79,6 +96,7 @@ impl PlatformWindow {
             mouse_state: RefCell::new(MouseState {
                 last_button_down: None,
             }),
+            window_state_flags: RefCell::new(WindowStateFlags::default()),
         }
     }
 
@@ -167,8 +185,6 @@ impl WindowAdapter for PlatformWindow {
 }
 
 impl WindowDelegate for PlatformWindow {
-    fn displays_changed(&self) {}
-
     fn should_close(&self) {
         let u = self.delegate.upgrade();
         if let Some(u) = u {
@@ -240,8 +256,12 @@ impl PlatformWindow {
         Ok(())
     }
 
-    pub fn activate(&self) -> PlatformResult<bool> {
+    pub fn activate(&self, _activate_application: bool) -> PlatformResult<bool> {
         self.state.borrow().activate()
+    }
+
+    pub fn deactivate(&self, _deactivate_application: bool) -> PlatformResult<bool> {
+        self.state.borrow().deactivate()
     }
 
     pub fn ready_to_show(&self) -> PlatformResult<()> {
@@ -292,12 +312,49 @@ impl PlatformWindow {
         self.state.borrow().set_title(title)
     }
 
+    pub fn set_collection_behavior(
+        &self,
+        _behavior: WindowCollectionBehavior,
+    ) -> PlatformResult<()> {
+        Err(PlatformError::NotAvailable)
+    }
+
+    pub fn set_minimized(&self, minimized: bool) -> PlatformResult<()> {
+        if minimized && !self.window_state_flags.borrow().is_minimized() {
+            self.state.borrow().minimize();
+        } else if !minimized && self.window_state_flags.borrow().is_minimized() {
+            self.state.borrow().restore();
+        }
+        Ok(())
+    }
+
+    pub fn set_maximized(&self, maximized: bool) -> PlatformResult<()> {
+        if maximized && !self.window_state_flags.borrow().is_maximized() {
+            self.state.borrow().maximize();
+        } else if !maximized && self.window_state_flags.borrow().is_maximized() {
+            self.state.borrow().restore();
+        }
+        Ok(())
+    }
+
+    pub fn set_full_screen(&self, _full_screen: bool) -> PlatformResult<()> {
+        Err(PlatformError::NotAvailable)
+    }
+
+    pub fn get_screen_id(&self) -> PlatformResult<i64> {
+        PlatformScreenManager::screen_id_from_hwnd(self.hwnd())
+    }
+
     pub fn save_position_to_string(&self) -> PlatformResult<String> {
         self.state.borrow().save_position_to_string()
     }
 
     pub fn restore_position_from_string(&self, position: String) -> PlatformResult<()> {
         self.state.borrow().restore_position_from_string(position)
+    }
+
+    pub fn get_window_state_flags(&self) -> PlatformResult<WindowStateFlags> {
+        Ok(self.window_state_flags.borrow().clone())
     }
 
     pub fn set_style(&self, style: WindowStyle) -> PlatformResult<()> {
@@ -440,6 +497,36 @@ impl PlatformWindow {
         }
     }
 
+    fn update_state_flags(&self, new_state_flags: WindowStateFlags) {
+        if *self.window_state_flags.borrow() != new_state_flags {
+            self.window_state_flags.replace(new_state_flags);
+            if let Some(delegate) = self.delegate() {
+                delegate.state_flags_changed();
+            }
+        }
+    }
+
+    fn on_wmsize(&self, w_param: WPARAM) {
+        let mut new_state_flags = self.window_state_flags.borrow().clone();
+        new_state_flags.maximized = if w_param.0 as u32 & SIZE_MAXIMIZED != 0 {
+            BoolTransition::Yes
+        } else {
+            BoolTransition::No
+        };
+        new_state_flags.minimized = if w_param.0 as u32 & SIZE_MINIMIZED != 0 {
+            BoolTransition::Yes
+        } else {
+            BoolTransition::No
+        };
+        self.update_state_flags(new_state_flags);
+    }
+
+    fn on_wmactivate(&self, w_param: WPARAM) {
+        let mut new_state_flags = self.window_state_flags.borrow().clone();
+        new_state_flags.active = w_param.0 as u32 & (WA_ACTIVE | WA_CLICKACTIVE) != 0;
+        self.update_state_flags(new_state_flags);
+    }
+
     fn handle_message(
         &self,
         h_wnd: HWND,
@@ -453,6 +540,7 @@ impl PlatformWindow {
         match msg {
             WM_SIZE => {
                 self.layout_child();
+                self.on_wmsize(w_param);
             }
             WM_SHOWWINDOW => {
                 self.layout_child();
@@ -500,7 +588,9 @@ impl PlatformWindow {
             WM_SETFOCUS => unsafe {
                 SetFocus(self.child_hwnd());
             },
-            WM_ACTIVATE => {}
+            WM_ACTIVATE => {
+                self.on_wmactivate(w_param);
+            }
             WM_NCCALCSIZE => unsafe {
                 // No redirection surface, or redireciton surface with removed border; In this case we
                 // need to resize child in WM_NCALCSIZE for better performance

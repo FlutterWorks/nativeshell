@@ -9,11 +9,14 @@ class Channels {
   static final menuManager = 'nativeshell/menu-manager';
   static final keyboardMapManager = 'nativeshell/keyboard-map-manager';
   static final hotKeyManager = 'nativeshell/hot-key-manager';
+  static final screenManager = 'nativeshell/screen-manager';
+  static final statusItemManager = 'nativeshell/status-item-manager';
 }
 
 class Events {
   static final windowInitialize = 'event:Window.initialize';
   static final windowVisibilityChanged = 'event:Window.visibilityChanged';
+  static final WindowStateFlagsChanged = 'event:Window.stateFlagsChanged';
   static final windowCloseRequest = 'event:Window.closeRequest';
   static final windowClose = 'event:Window.close';
 }
@@ -32,15 +35,22 @@ class Methods {
   static final windowReadyToShow = 'Window.readyToShow';
   static final windowHide = 'Window.hide';
   static final windowActivate = 'Window.activate';
+  static final windowDeactivate = 'Window.deactivate';
   static final windowClose = 'Window.close';
   static final windowCloseWithResult = 'Window.closeWithResult';
 
   static final windowSetGeometry = 'Window.setGeometry';
   static final windowGetGeometry = 'Window.getGeometry';
   static final windowSupportedGeometry = 'Window.supportedGeometry';
+  static final windowGetScreenId = 'Window.getScreenId';
 
   static final windowSetStyle = 'Window.setStyle';
   static final windowSetTitle = 'Window.setTitle';
+  static final windowSetMinimized = 'Window.setMinimized';
+  static final windowSetMaximized = 'Window.setMaximized';
+  static final windowSetFullScreen = 'Window.setFullScreen';
+  static final windowSetCollectionBehavior = 'Window.setCollectionBehavior';
+  static final windowGetWindowStateFlags = 'Window.getWindowStateFlags';
   static final windowPerformWindowDrag = 'Window.performWindowDrag';
 
   static final windowShowPopupMenu = 'Window.showPopupMenu';
@@ -80,6 +90,25 @@ class Methods {
   static final hotKeyCreate = 'HotKey.create';
   static final hotKeyDestroy = 'HotKey.destroy';
   static final hotKeyOnPressed = 'HotKey.onPressed';
+
+  // ScreenManager
+  static final screenManagerScreensChanged = 'ScreenManager.screensChanged';
+  static final screenManagerGetScreens = 'ScreenManager.getScreens';
+  static final screenManagerGetMainScreen = 'ScreenManager.getMainScreen';
+  static final screenManagerLogicalToSystem = 'ScreenManager.logicalToSystem';
+  static final screenManagerSystemToLogical = 'ScreenManager.systemToLogical';
+
+  // StatusItem
+  static final statusItemInit = 'StatusItem.init';
+  static final statusItemCreate = 'StatusItem.create';
+  static final statusItemDestroy = 'StatusItem.destroy';
+  static final statusItemSetImage = 'StatusItem.setImage';
+  static final statusItemSetHint = 'StatusItem.setHint';
+  static final statusItemShowMenu = 'StatusItem.showMenu';
+  static final statusItemSetHighlighted = 'StatusItem.setHighlighted';
+  static final statusItemGetGeometry = 'StatusItem.getGeometry';
+  static final statusItemGetScreenId = 'StatusItem.getScreenId';
+  static final statusItemOnAction = 'StatusItem.onAction';
 }
 
 class Keys {

@@ -12,6 +12,8 @@ use super::{
         app_delegate::ApplicationDelegateManager, drag_data::DragDataAdapter,
         engine::PlatformPlugin, init::init_platform,
     },
+    screen_manager::ScreenManager,
+    status_item_manager::StatusItemManager,
     EngineManager, HotKeyManager, JoinHandle, KeyboardMapManager, MenuManager, MessageManager,
     RegisteredMethodCallHandler, RunLoop, WindowManager, WindowMethodChannel,
 };
@@ -45,6 +47,8 @@ pub struct ContextImpl {
     pub(crate) menu_manager: LateRefCell<RegisteredMethodCallHandler<MenuManager>>,
     pub(crate) keyboard_map_manager: LateRefCell<RegisteredMethodCallHandler<KeyboardMapManager>>,
     pub(crate) hot_key_manager: LateRefCell<RegisteredMethodCallHandler<HotKeyManager>>,
+    pub(crate) screen_manager: LateRefCell<RegisteredMethodCallHandler<ScreenManager>>,
+    pub(crate) status_item_manager: LateRefCell<RegisteredMethodCallHandler<StatusItemManager>>,
 }
 
 impl ContextImpl {
@@ -60,6 +64,8 @@ impl ContextImpl {
             menu_manager: LateRefCell::new(),
             keyboard_map_manager: LateRefCell::new(),
             hot_key_manager: LateRefCell::new(),
+            screen_manager: LateRefCell::new(),
+            status_item_manager: LateRefCell::new(),
         });
         let res = ContextRef { context: res };
         res.initialize(&res)?;
@@ -81,6 +87,9 @@ impl ContextImpl {
         self.keyboard_map_manager
             .set(KeyboardMapManager::new(context.weak()));
         self.hot_key_manager.set(HotKeyManager::new(context.weak()));
+        self.screen_manager.set(ScreenManager::new(context.weak()));
+        self.status_item_manager
+            .set(StatusItemManager::new(context.weak()));
 
         #[cfg(debug_assertions)]
         {

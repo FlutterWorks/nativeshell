@@ -2,7 +2,6 @@ use std::{collections::HashMap, mem::take};
 
 use gdk::Atom;
 use gtk::SelectionData;
-use lazy_static::__Deref;
 use log::warn;
 use percent_encoding::percent_decode_str;
 use url::Url;
@@ -118,7 +117,7 @@ impl DragDataAdapter for UriListDataAdapter {
             for file in files {
                 let uri = format!(
                     "file://{}",
-                    percent_encoding::utf8_percent_encode(&file, FRAGMENT).to_string()
+                    percent_encoding::utf8_percent_encode(&file, FRAGMENT)
                 );
                 if !uris.contains(&uri) {
                     uris.push(uri);
@@ -177,7 +176,7 @@ struct UriDragData {
 impl DragDataSetter for UriDragData {
     fn set(&self, selection_data: &SelectionData) {
         if self.set_as_uris {
-            let uris: Vec<&str> = self.uris.iter().map(|s| s.deref()).collect();
+            let uris: Vec<&str> = self.uris.iter().map(|s| s.as_str()).collect();
             selection_data.set_uris(&uris);
         } else {
             let mut str = String::new();

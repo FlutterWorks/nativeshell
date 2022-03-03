@@ -4,6 +4,33 @@ use std::{
     rc::{Rc, Weak},
 };
 
+use windows::Win32::{
+    Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+    Graphics::{
+        Dwm::DwmExtendFrameIntoClientArea,
+        Gdi::{ClientToScreen, ScreenToClient},
+    },
+    UI::{
+        Controls::MARGINS,
+        Input::KeyboardAndMouse::ReleaseCapture,
+        WindowsAndMessaging::{
+            DestroyWindow, EnableMenuItem, GetSystemMenu, GetWindowLongW, GetWindowPlacement,
+            GetWindowRect, IsWindowVisible, SendMessageW, SetForegroundWindow, SetWindowLongW,
+            SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow, GWL_EXSTYLE, GWL_STYLE,
+            HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+            HTTOPLEFT, HTTOPRIGHT, HTTRANSPARENT, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP,
+            HWND_TOPMOST, MF_BYCOMMAND, MF_DISABLED, MF_ENABLED, MF_GRAYED, SC_CLOSE,
+            SHOW_WINDOW_CMD, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_NOZORDER, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_NORMAL, SW_SHOW, WINDOWPLACEMENT,
+            WINDOWPOS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE,
+            WM_DWMCOMPOSITIONCHANGED, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDOWN,
+            WM_WINDOWPOSCHANGING, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_EX_LAYOUTRTL,
+            WS_EX_NOREDIRECTIONBITMAP, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_OVERLAPPEDWINDOW,
+            WS_POPUP, WS_SYSMENU, WS_THICKFRAME,
+        },
+    },
+};
+
 use crate::{
     shell::{
         api_model::{
@@ -16,11 +43,10 @@ use crate::{
 };
 
 use super::{
-    all_bindings::*,
     display::Displays,
     error::PlatformResult,
     flutter_sys::{FlutterDesktopGetDpiForHWND, FlutterDesktopGetDpiForMonitor},
-    util::{as_u8_slice, clamp, BoolResultExt, GET_X_LPARAM, GET_Y_LPARAM},
+    util::{as_u8_slice, BoolResultExt, GET_X_LPARAM, GET_Y_LPARAM},
 };
 
 pub struct WindowBaseState {
@@ -57,7 +83,36 @@ impl WindowBaseState {
     }
 
     pub fn activate(&self) -> PlatformResult<bool> {
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                match self.style.borrow().always_on_top {
+                    true => HWND_TOPMOST,
+                    false => HWND_TOP,
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
         unsafe { Ok(SetForegroundWindow(self.hwnd).into()) }
+    }
+
+    pub fn deactivate(&self) -> PlatformResult<bool> {
+        unsafe {
+            Ok(SetWindowPos(
+                self.hwnd,
+                HWND_BOTTOM,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            )
+            .into())
+        }
     }
 
     pub fn show<F>(&self, callback: F) -> PlatformResult<()>
@@ -293,8 +348,8 @@ impl WindowBaseState {
             std::cmp::min(max_content.height, max_frame.height),
         );
 
-        position.cx = clamp(position.cx, min_size.width, max_size.width);
-        position.cy = clamp(position.cy, min_size.height, max_size.height);
+        position.cx = position.cx.clamp(min_size.width, max_size.width);
+        position.cy = position.cy.clamp(min_size.height, max_size.height);
 
         Ok(())
     }
@@ -453,7 +508,39 @@ impl WindowBaseState {
 
             self.update_dwm_frame()?;
         }
+        unsafe {
+            SetWindowPos(
+                self.hwnd,
+                match style.always_on_top {
+                    true => HWND_TOPMOST,
+                    false => HWND_NOTOPMOST,
+                },
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            )
+        };
         Ok(())
+    }
+
+    pub fn minimize(&self) {
+        unsafe {
+            ShowWindow(self.hwnd, SW_MINIMIZE);
+        }
+    }
+
+    pub fn maximize(&self) {
+        unsafe {
+            ShowWindow(self.hwnd, SW_MAXIMIZE);
+        }
+    }
+
+    pub fn restore(&self) {
+        unsafe {
+            ShowWindow(self.hwnd, SW_NORMAL);
+        }
     }
 
     pub fn save_position_to_string(&self) -> PlatformResult<String> {
@@ -569,7 +656,6 @@ impl WindowBaseState {
             }
             WM_DISPLAYCHANGE => {
                 Displays::displays_changed();
-                self.delegate().displays_changed();
                 None
             }
             WM_WINDOWPOSCHANGING => {
@@ -608,7 +694,7 @@ impl WindowBaseState {
             WM_NCHITTEST => {
                 if self.remove_border() {
                     let res = self.do_hit_test(GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param));
-                    Some(LRESULT(res as i32))
+                    Some(LRESULT(res as isize))
                 } else {
                     None
                 }
@@ -629,9 +715,9 @@ impl WindowBaseState {
                 if self.remove_border() {
                     let res = self.do_hit_test(GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param));
                     if res != HTCLIENT {
-                        Some(LRESULT(HTTRANSPARENT))
+                        Some(LRESULT(HTTRANSPARENT as isize))
                     } else {
-                        Some(LRESULT(res as i32))
+                        Some(LRESULT(res as isize))
                     }
                 } else {
                     None
@@ -645,5 +731,4 @@ impl WindowBaseState {
 pub trait WindowDelegate {
     fn should_close(&self);
     fn will_close(&self);
-    fn displays_changed(&self);
 }

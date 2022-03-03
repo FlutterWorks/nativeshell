@@ -3,14 +3,16 @@ use super::{
     engine::PlatformEngine,
     error::{PlatformError, PlatformResult},
     menu::PlatformMenu,
+    screen_manager::PlatformScreenManager,
     utils::*,
 };
 use crate::{
     codec::Value,
     shell::{
         api_model::{
-            DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse, WindowFrame,
-            WindowGeometry, WindowGeometryFlags, WindowGeometryRequest, WindowStyle,
+            BoolTransition, DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse,
+            WindowCollectionBehavior, WindowFrame, WindowGeometry, WindowGeometryFlags,
+            WindowGeometryRequest, WindowStateFlags, WindowStyle,
         },
         Context, PlatformWindowDelegate, Point, Size,
     },
@@ -18,7 +20,7 @@ use crate::{
 };
 use cocoa::{
     appkit::{
-        CGPoint, NSApplication, NSEvent, NSEventType, NSScreen, NSView, NSViewHeightSizable,
+        CGPoint, NSApplication, NSEvent, NSEventType, NSView, NSViewHeightSizable,
         NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
         NSWindowTabbingMode, NSWindowTitleVisibility,
     },
@@ -29,7 +31,6 @@ use cocoa::{
 };
 use core_foundation::base::CFRelease;
 use core_graphics::event::CGEventType;
-use lazy_static::lazy_static;
 use objc::{
     class,
     declare::ClassDecl,
@@ -38,6 +39,7 @@ use objc::{
     runtime::{Class, Object, Sel},
     sel, sel_impl,
 };
+use once_cell::sync::Lazy;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -70,6 +72,7 @@ pub struct PlatformWindow {
     flutter_view: LateRefCell<StrongPtr>,
     mouse_down: Cell<bool>,
     mouse_dragged: Cell<bool>,
+    window_state_flags: RefCell<WindowStateFlags>,
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -93,7 +96,7 @@ impl PlatformWindow {
                 | NSWindowStyleMask::NSClosableWindowMask
                 | NSWindowStyleMask::NSResizableWindowMask
                 | NSWindowStyleMask::NSMiniaturizableWindowMask;
-            let window: id = msg_send![WINDOW_CLASS.0, alloc];
+            let window: id = msg_send![*WINDOW_CLASS, alloc];
             let window = window.initWithContentRect_styleMask_backing_defer_(
                 rect,
                 style,
@@ -106,7 +109,7 @@ impl PlatformWindow {
             NSWindow::setAllowsAutomaticWindowTabbing_(*window, NO);
             NSWindow::setTabbingMode_(*window, NSWindowTabbingMode::NSWindowTabbingModeDisallowed);
 
-            let platform_delegate: id = msg_send![WINDOW_DELEGATE_CLASS.0, new];
+            let platform_delegate: id = msg_send![*WINDOW_DELEGATE_CLASS, new];
             let platform_delegate = StrongPtr::new(platform_delegate);
 
             window.setDelegate_(*platform_delegate);
@@ -131,6 +134,7 @@ impl PlatformWindow {
                 flutter_view: LateRefCell::new(),
                 mouse_down: Cell::new(false),
                 mouse_dragged: Cell::new(false),
+                window_state_flags: RefCell::new(WindowStateFlags::default()),
             }
         })
     }
@@ -275,21 +279,28 @@ impl PlatformWindow {
         })
     }
 
+    pub fn get_screen_id(&self) -> PlatformResult<i64> {
+        unsafe {
+            let screen = NSWindow::screen(*self.platform_window);
+            Ok(PlatformScreenManager::get_screen_id(screen))
+        }
+    }
+
     unsafe fn set_frame_origin(&self, position: Point) {
-        let screen_frame = NSScreen::frame(self.platform_window.screen());
+        let screen_frame = global_screen_frame();
         let position = Point {
             x: position.x,
-            y: screen_frame.size.height - position.y,
+            y: screen_frame.y2() - position.y,
         };
         self.platform_window.setFrameTopLeftPoint_(position.into());
     }
 
     unsafe fn get_frame_origin(&self) -> Point {
-        let screen_frame = NSScreen::frame(self.platform_window.screen());
+        let screen_frame = global_screen_frame();
         let window_frame = NSWindow::frame(*self.platform_window);
         Point {
             x: window_frame.origin.x,
-            y: screen_frame.size.height - (window_frame.origin.y + window_frame.size.height),
+            y: screen_frame.y2() - (window_frame.origin.y + window_frame.size.height),
         }
     }
 
@@ -302,12 +313,12 @@ impl PlatformWindow {
     }
 
     unsafe fn set_content_position(&self, position: Point) {
-        let screen_frame = NSScreen::frame(self.platform_window.screen());
+        let screen_frame = global_screen_frame();
         let content_size = NSView::frame(self.platform_window.contentView()).size;
         let content_rect = NSRect::new(
             Point {
                 x: position.x,
-                y: screen_frame.size.height - (position.y + content_size.height),
+                y: screen_frame.y2() - (position.y + content_size.height),
             }
             .into(),
             content_size,
@@ -317,12 +328,12 @@ impl PlatformWindow {
     }
 
     unsafe fn get_content_position(&self) -> Point {
-        let screen_frame = NSScreen::frame(self.platform_window.screen());
+        let screen_frame = global_screen_frame();
         let window_frame = NSWindow::frame(*self.platform_window);
         let content_rect = self.platform_window.contentRectForFrameRect_(window_frame);
         Point {
             x: content_rect.origin.x,
-            y: screen_frame.size.height - (content_rect.origin.y + content_rect.size.height),
+            y: screen_frame.y2() - (content_rect.origin.y + content_rect.size.height),
         }
     }
 
@@ -445,6 +456,14 @@ impl PlatformWindow {
             NSWindow::setCollectionBehavior_(*self.platform_window, collection_behavior);
 
             NSWindow::setStyleMask_(*self.platform_window, mask);
+
+            NSWindow::setLevel_(
+                *self.platform_window,
+                match style.always_on_top {
+                    true => style.always_on_top_level.unwrap_or(3), /* kCGFloatingWindowLevel */
+                    false => 0,                                     /* kCGNormalWindowLevel */
+                },
+            );
         }
         Ok(())
     }
@@ -471,8 +490,84 @@ impl PlatformWindow {
         Ok(())
     }
 
+    pub fn get_window_state_flags(&self) -> PlatformResult<WindowStateFlags> {
+        Ok(self.window_state_flags.borrow().clone())
+    }
+
     pub fn is_modal(&self) -> bool {
         self.modal_close_callback.borrow().is_some()
+    }
+
+    pub fn set_collection_behavior(
+        &self,
+        behavior: WindowCollectionBehavior,
+    ) -> PlatformResult<()> {
+        let mut b = NSWindowCollectionBehavior::empty();
+
+        if behavior.can_join_all_spaces {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorCanJoinAllSpaces;
+        }
+        if behavior.move_to_active_space {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorMoveToActiveSpace;
+        }
+        if behavior.managed {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorManaged;
+        }
+        if behavior.transient {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorTransient;
+        }
+        if behavior.participates_in_cycle {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorParticipatesInCycle;
+        }
+        if behavior.ignores_cycle {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle;
+        }
+        if behavior.full_screen_primary {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenPrimary;
+        }
+        if behavior.full_screen_auxiliary {
+            b |= NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary;
+        }
+        if behavior.full_screen_none {
+            b |= unsafe { std::mem::transmute((1 << 9) as NSUInteger) };
+        }
+        if behavior.allows_tiling {
+            b |= unsafe { std::mem::transmute((1 << 11) as NSUInteger) };
+        }
+        if behavior.disallows_tiling {
+            b |= unsafe { std::mem::transmute((1 << 12) as NSUInteger) };
+        }
+        unsafe {
+            NSWindow::setCollectionBehavior_(*self.platform_window, b);
+        }
+        Ok(())
+    }
+
+    pub fn set_minimized(&self, minimized: bool) -> PlatformResult<()> {
+        if minimized {
+            unsafe { NSWindow::miniaturize_(*self.platform_window, nil) };
+        } else {
+            unsafe { NSWindow::deminiaturize_(*self.platform_window, nil) };
+        }
+        Ok(())
+    }
+
+    pub fn set_maximized(&self, maximized: bool) -> PlatformResult<()> {
+        let is_zoomed: BOOL = unsafe { msg_send![*self.platform_window, isZoomed] };
+        let is_zoomed = is_zoomed == YES;
+        if (maximized && !is_zoomed) || (!maximized && is_zoomed) {
+            unsafe { NSWindow::zoom_(*self.platform_window, nil) };
+        }
+        Ok(())
+    }
+
+    pub fn set_full_screen(&self, full_screen: bool) -> PlatformResult<()> {
+        let masks = unsafe { NSWindow::styleMask(*self.platform_window) };
+        let is_full_screen = masks.contains(NSWindowStyleMask::NSFullScreenWindowMask);
+        if (full_screen && !is_full_screen) || (!full_screen && is_full_screen) {
+            unsafe { NSWindow::toggleFullScreen_(*self.platform_window, nil) };
+        }
+        Ok(())
     }
 
     unsafe fn actually_show(&self) {
@@ -610,11 +705,28 @@ impl PlatformWindow {
         Ok(())
     }
 
-    pub fn activate(&self) -> PlatformResult<bool> {
+    pub fn activate(&self, activate_application: bool) -> PlatformResult<bool> {
         unsafe {
             let app = NSApplication::sharedApplication(nil);
             NSApplication::activateIgnoringOtherApps_(app, YES);
+            if activate_application {
+                let app = NSApplication::sharedApplication(nil);
+                NSApplication::activateIgnoringOtherApps_(app, YES);
+            }
             NSWindow::makeKeyAndOrderFront_(*self.platform_window, nil);
+        }
+        Ok(true)
+    }
+
+    pub fn deactivate(&self, deactivate_application: bool) -> PlatformResult<bool> {
+        unsafe {
+            let () = msg_send![*self.platform_window, resignFirstResponder];
+            NSWindow::orderBack_(*self.platform_window, nil);
+            if deactivate_application {
+                let app = NSApplication::sharedApplication(nil);
+                let () = msg_send![app, hide: nil];
+                let () = msg_send![app, unhideWithoutActivation];
+            }
         }
         Ok(true)
     }
@@ -923,115 +1035,148 @@ impl PlatformWindow {
     }
 }
 
-struct WindowClass(*const Class);
-// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
-unsafe impl Send for WindowClass {}
-unsafe impl Sync for WindowClass {}
-struct WindowDelegateClass(*const Class);
-// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
-unsafe impl Send for WindowDelegateClass {}
-unsafe impl Sync for WindowDelegateClass {}
-
-lazy_static! {
-    static ref WINDOW_CLASS: WindowClass = unsafe {
-        // FlutterView doesn't override acceptsFirstMouse: so we do it here
-        {
-            let mut class = class_decl_from_name("FlutterView");
-            class.add_method(
-                sel!(acceptsFirstMouse:),
-                accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
-            );
-        }
-
-        let window_superclass = class!(NSWindow);
-        let mut decl = ClassDecl::new("IMFlutterWindow", window_superclass).unwrap();
-
-        decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
-
-        decl.add_method(sel!(layoutIfNeeded), layout_if_needed as extern "C" fn(&mut Object, Sel));
-
-        decl.add_method(
-            sel!(sendEvent:),
-            send_event as extern "C" fn(&mut Object, Sel, id),
+static WINDOW_CLASS: Lazy<&'static Class> = Lazy::new(|| unsafe {
+    // FlutterView doesn't override acceptsFirstMouse: so we do it here
+    {
+        let mut class = class_decl_from_name("FlutterView");
+        class.add_method(
+            sel!(acceptsFirstMouse:),
+            accepts_first_mouse as extern "C" fn(&Object, Sel, id) -> BOOL,
         );
+    }
 
-        decl.add_method(
-            sel!(canBecomeKeyWindow),
-            can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
-        );
+    let window_superclass = class!(NSWindow);
+    let mut decl = ClassDecl::new("IMFlutterWindow", window_superclass).unwrap();
 
-        decl.add_method(
-            sel!(draggingEntered:),
-            dragging_entered as extern "C" fn(&mut Object, Sel, id) -> NSDragOperation,
-        );
+    decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
 
-        decl.add_method(
-            sel!(draggingUpdated:),
-            dragging_updated as extern "C" fn(&mut Object, Sel, id) -> NSDragOperation,
-        );
+    decl.add_method(
+        sel!(layoutIfNeeded),
+        layout_if_needed as extern "C" fn(&mut Object, Sel),
+    );
 
-        decl.add_method(
-            sel!(draggingExited:),
-            dragging_exited as extern "C" fn(&mut Object, Sel, id),
-        );
+    decl.add_method(
+        sel!(sendEvent:),
+        send_event as extern "C" fn(&mut Object, Sel, id),
+    );
 
-        decl.add_method(
-            sel!(performDragOperation:),
-            perform_drag_operation as extern "C" fn(&mut Object, Sel, id) -> BOOL,
-        );
+    decl.add_method(
+        sel!(canBecomeKeyWindow),
+        can_become_key_window as extern "C" fn(&Object, Sel) -> BOOL,
+    );
 
-        decl.add_method(
-            sel!(draggingSession:sourceOperationMaskForDraggingContext:),
-            source_operation_mask_for_dragging_context
-                as extern "C" fn(&mut Object, Sel, id, NSInteger) -> NSDragOperation,
-        );
+    decl.add_method(
+        sel!(canBecomeMainWindow),
+        can_become_main_window as extern "C" fn(&Object, Sel) -> BOOL,
+    );
 
-        decl.add_method(
-            sel!(draggingSession:endedAtPoint:operation:),
-            dragging_session_ended_at_point
-                as extern "C" fn(&mut Object, Sel, id, NSPoint, NSDragOperation),
-        );
+    decl.add_method(
+        sel!(draggingEntered:),
+        dragging_entered as extern "C" fn(&mut Object, Sel, id) -> NSDragOperation,
+    );
 
-        decl.add_ivar::<*mut c_void>("imState");
+    decl.add_method(
+        sel!(draggingUpdated:),
+        dragging_updated as extern "C" fn(&mut Object, Sel, id) -> NSDragOperation,
+    );
 
-        WindowClass(decl.register())
-    };
-    static ref WINDOW_DELEGATE_CLASS: WindowDelegateClass = unsafe {
-        let delegate_superclass = class!(NSResponder);
-        let mut decl = ClassDecl::new("IMFlutterWindowDelegate", delegate_superclass).unwrap();
+    decl.add_method(
+        sel!(draggingExited:),
+        dragging_exited as extern "C" fn(&mut Object, Sel, id),
+    );
 
-        decl.add_method(
-            sel!(windowDidMove:),
-            window_did_move as extern "C" fn(&Object, Sel, id),
-        );
+    decl.add_method(
+        sel!(performDragOperation:),
+        perform_drag_operation as extern "C" fn(&mut Object, Sel, id) -> BOOL,
+    );
 
-        decl.add_method(
-            sel!(windowShouldClose:),
-            window_should_close as extern "C" fn(&Object, Sel, id) -> BOOL,
-        );
+    decl.add_method(
+        sel!(draggingSession:sourceOperationMaskForDraggingContext:),
+        source_operation_mask_for_dragging_context
+            as extern "C" fn(&mut Object, Sel, id, NSInteger) -> NSDragOperation,
+    );
 
-        decl.add_method(
-            sel!(windowWillClose:),
-            window_will_close as extern "C" fn(&Object, Sel, id),
-        );
+    decl.add_method(
+        sel!(draggingSession:endedAtPoint:operation:),
+        dragging_session_ended_at_point
+            as extern "C" fn(&mut Object, Sel, id, NSPoint, NSDragOperation),
+    );
 
-        decl.add_method(
-            sel!(windowDidBecomeKey:),
-            window_did_become_key as extern "C" fn(&Object, Sel, id),
-        );
+    decl.add_ivar::<*mut c_void>("imState");
 
-        decl.add_method(
-            sel!(windowDidResignKey:),
-            window_did_resign_key as extern "C" fn(&Object, Sel, id),
-        );
+    decl.register()
+});
 
-        decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
+static WINDOW_DELEGATE_CLASS: Lazy<&'static Class> = Lazy::new(|| unsafe {
+    let delegate_superclass = class!(NSResponder);
+    let mut decl = ClassDecl::new("IMFlutterWindowDelegate", delegate_superclass).unwrap();
 
-        decl.add_ivar::<*mut c_void>("imState");
+    decl.add_method(
+        sel!(windowDidMove:),
+        window_did_move as extern "C" fn(&Object, Sel, id),
+    );
 
-        WindowDelegateClass(decl.register())
-    };
-}
+    decl.add_method(
+        sel!(windowShouldClose:),
+        window_should_close as extern "C" fn(&Object, Sel, id) -> BOOL,
+    );
+
+    decl.add_method(
+        sel!(windowWillClose:),
+        window_will_close as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowWillMiniaturize:),
+        window_will_miniaturize as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidMiniaturize:),
+        window_did_miniaturize as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidDeminiaturize:),
+        window_did_deminiaturize as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowWillEnterFullScreen:),
+        window_will_enter_full_screen as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidEnterFullScreen:),
+        window_did_enter_full_screen as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowWillExitFullScreen:),
+        window_will_exit_full_screen as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidExitFullScreen:),
+        window_did_exit_full_screen as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidResignMain:),
+        window_did_resign_main as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
+        sel!(windowDidBecomeMain:),
+        window_did_become_main as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(sel!(dealloc), dealloc as extern "C" fn(&Object, Sel));
+
+    decl.add_ivar::<*mut c_void>("imState");
+
+    decl.register()
+});
 
 fn with_state<F>(this: &Object, callback: F)
 where
@@ -1126,21 +1271,6 @@ extern "C" fn accepts_first_mouse(_this: &Object, _sel: Sel, _event: id) -> BOOL
     YES
 }
 
-extern "C" fn window_did_become_key(this: &Object, _: Sel, _: id) {
-    with_state_delegate(this, |state, _delegate| {
-        if let Some(context) = state.context.get() {
-            context
-                .menu_manager
-                .borrow()
-                .borrow()
-                .get_platform_menu_manager()
-                .window_did_become_active(state.platform_window.clone());
-        }
-    });
-}
-
-extern "C" fn window_did_resign_key(_this: &Object, _: Sel, _: id) {}
-
 extern "C" fn layout_if_needed(this: &mut Object, _sel: Sel) {
     unsafe {
         with_state(this, move |state| {
@@ -1154,6 +1284,83 @@ extern "C" fn layout_if_needed(this: &mut Object, _sel: Sel) {
 extern "C" fn can_become_key_window(_this: &Object, _: Sel) -> BOOL {
     // needed for frameless windows to accept keyboard input.
     YES
+}
+
+extern "C" fn can_become_main_window(_this: &Object, _: Sel) -> BOOL {
+    // needed for frameless windows to become active.
+    YES
+}
+
+extern "C" fn window_will_miniaturize(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().minimized = BoolTransition::NoToYes;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_did_miniaturize(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().minimized = BoolTransition::Yes;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_did_deminiaturize(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().minimized = BoolTransition::No;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_will_enter_full_screen(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().full_screen = BoolTransition::NoToYes;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_did_enter_full_screen(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().full_screen = BoolTransition::Yes;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_will_exit_full_screen(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().full_screen = BoolTransition::YesToNo;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_did_exit_full_screen(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().full_screen = BoolTransition::No;
+        delegate.state_flags_changed();
+    });
+}
+
+extern "C" fn window_did_become_main(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().active = true;
+        delegate.state_flags_changed();
+
+        if let Some(context) = state.context.get() {
+            context
+                .menu_manager
+                .borrow()
+                .borrow()
+                .get_platform_menu_manager()
+                .window_did_become_active(state.platform_window.clone());
+        }
+    });
+}
+
+extern "C" fn window_did_resign_main(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        state.window_state_flags.borrow_mut().active = false;
+        delegate.state_flags_changed();
+    });
 }
 
 extern "C" fn send_event(this: &mut Object, _: Sel, e: id) {

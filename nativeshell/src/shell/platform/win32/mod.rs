@@ -15,31 +15,10 @@ pub mod init;
 pub mod keyboard_map;
 pub mod menu;
 pub mod run_loop;
+pub mod screen_manager;
+pub mod status_item;
 pub mod util;
 pub mod window;
 pub mod window_adapter;
 pub mod window_base;
 pub mod window_menu;
-
-#[allow(dead_code)]
-mod bindings {
-    ::windows::include_bindings!();
-}
-
-// This bit of a lie, it doesn't have dxgi
-mod all_bindings {
-    pub use super::bindings::Windows::Win32::{
-        Foundation::*,
-        Graphics::{Dwm::*, Gdi::*},
-        Storage::StructuredStorage::*,
-        System::{
-            Com::*, DataExchange::*, Diagnostics::Debug::*, LibraryLoader::*, Memory::*,
-            SystemServices::*, Threading::*,
-        },
-        UI::{
-            Controls::*, KeyboardAndMouseInput::*, Shell::*, TextServices::*,
-            WindowsAndMessaging::*,
-        },
-    };
-    pub use windows::*;
-}

@@ -1,7 +1,25 @@
-use super::{
-    all_bindings::*,
-    error::{PlatformError, PlatformResult},
+use std::mem::size_of;
+
+use libc::c_void;
+use windows::{
+    core::{Interface, RawPtr, GUID, HRESULT},
+    Win32::{
+        Foundation::{GetLastError, BOOL, HANDLE, HWND, LPARAM, PWSTR},
+        Graphics::Gdi::{
+            CreateDIBSection, GetDC, ReleaseDC, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+            DIB_RGB_COLORS, HBITMAP,
+        },
+        System::{
+            Com::{CoCreateInstance, CLSCTX_ALL},
+            DataExchange::GetClipboardFormatNameW,
+            Diagnostics::Debug::FACILITY_WIN32,
+        },
+    },
 };
+
+use crate::shell::api_model::ImageData;
+
+use super::error::{PlatformError, PlatformResult};
 
 pub(super) fn to_utf16(string: &str) -> Vec<u16> {
     let mut res: Vec<u16> = string.encode_utf16().collect();
@@ -17,6 +35,7 @@ pub unsafe fn as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 }
 
 pub fn get_raw_ptr<T>(t: &T) -> usize {
+    #[repr(transparent)]
     struct Extractor(usize);
     unsafe {
         let s = &*(t as *const _ as *const Extractor);
@@ -27,11 +46,12 @@ pub fn get_raw_ptr<T>(t: &T) -> usize {
 /// # Safety
 ///
 /// ptr must point to a valid COM object instance
-pub unsafe fn com_object_from_ptr<T: Clone>(ptr: ::windows::RawPtr) -> Option<T> {
+pub unsafe fn com_object_from_ptr<T: Clone>(ptr: RawPtr) -> Option<T> {
     if ptr.is_null() {
         None
     } else {
-        struct ComObject(windows::RawPtr);
+        #[repr(transparent)]
+        struct ComObject(RawPtr);
         let e = ComObject(ptr);
         let t = &*(&e as *const _ as *const T);
         Some(t.clone())
@@ -74,7 +94,7 @@ impl BoolResultExt for BOOL {
     }
 }
 
-pub fn create_instance<T: Interface>(clsid: &Guid) -> Result<T> {
+pub fn create_instance<T: Interface>(clsid: &GUID) -> windows::core::Result<T> {
     unsafe { CoCreateInstance(clsid, None, CLSCTX_ALL) }
 }
 
@@ -122,14 +142,72 @@ pub fn GET_Y_LPARAM(lp: LPARAM) -> i32 {
     HIWORD(lp.0 as u32) as i32
 }
 
-#[inline]
-pub fn clamp<T: PartialOrd>(input: T, min: T, max: T) -> T {
-    debug_assert!(min <= max, "min must be less than or equal to max");
-    if input < min {
-        min
-    } else if input > max {
-        max
-    } else {
-        input
+pub fn image_data_to_hbitmap(image: &ImageData) -> HBITMAP {
+    let bitmap = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: image.width,
+            biHeight: image.height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB as u32,
+            biSizeImage: (image.width * image.height * 4) as u32,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        },
+        bmiColors: Default::default(),
+    };
+
+    unsafe {
+        let dc = GetDC(HWND(0));
+
+        let mut ptr = std::ptr::null_mut();
+
+        let bitmap = CreateDIBSection(
+            dc,
+            &bitmap as *const _,
+            DIB_RGB_COLORS,
+            &mut ptr as *mut *mut _ as *mut *mut c_void,
+            HANDLE(0),
+            0,
+        );
+
+        // Bitmap needs to be flipped and unpremultiplied
+
+        let dst_stride = (image.width * 4) as isize;
+        let ptr = ptr as *mut u8;
+        for y in 0..image.height as isize {
+            let src_line = image
+                .data
+                .as_ptr()
+                .offset((image.height as isize - y - 1) * image.bytes_per_row as isize);
+
+            let dst_line = ptr.offset(y * dst_stride);
+
+            for x in (0..dst_stride).step_by(4) {
+                let (r, g, b, a) = (
+                    *src_line.offset(x) as i32,
+                    *src_line.offset(x + 1) as i32,
+                    *src_line.offset(x + 2) as i32,
+                    *src_line.offset(x + 3) as i32,
+                );
+
+                let (r, g, b) = if a == 0 {
+                    (0, 0, 0)
+                } else {
+                    (r * 255 / a, g * 255 / a, b * 255 / a)
+                };
+                *dst_line.offset(x) = b as u8;
+                *dst_line.offset(x + 1) = g as u8;
+                *dst_line.offset(x + 2) = r as u8;
+                *dst_line.offset(x + 3) = a as u8;
+            }
+        }
+
+        ReleaseDC(HWND(0), dc);
+
+        bitmap
     }
 }

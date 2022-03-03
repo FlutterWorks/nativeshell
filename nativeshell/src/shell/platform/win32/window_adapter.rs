@@ -1,22 +1,27 @@
-use super::{all_bindings::*, util::direct_composition_supported};
-use lazy_static::lazy_static;
+use windows::{
+    core::{IntoParam, Param},
+    Win32::{
+        Foundation::{BOOL, HINSTANCE, HWND, LPARAM, LRESULT, PWSTR, WPARAM},
+        Graphics::Gdi::HBRUSH,
+        System::LibraryLoader::{FreeLibrary, GetModuleHandleW, GetProcAddress, LoadLibraryW},
+        UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, LoadCursorW, RegisterClassW, UnregisterClassW,
+            CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HMENU, IDC_ARROW,
+            WINDOW_EX_STYLE, WINDOW_STYLE, WM_NCCREATE, WM_NCDESTROY, WNDCLASSW, WS_DLGFRAME,
+            WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_SYSMENU,
+            WS_THICKFRAME,
+        },
+    },
+};
+
+use super::util::direct_composition_supported;
 use std::{
     cell::RefCell,
     rc::{Rc, Weak},
 };
 
-struct Global {
-    window_class: RefCell<Weak<WindowClass>>,
-}
-
-// Send is required when other dependencies apply the lazy_static feature 'spin_no_std'
-unsafe impl Send for Global {}
-unsafe impl Sync for Global {}
-
-lazy_static! {
-    static ref GLOBAL: Global = Global {
-        window_class: RefCell::new(Weak::new()),
-    };
+thread_local! {
+    static WINDOW_CLASS: RefCell<Weak<WindowClass>> = RefCell::new(Weak::new());
 }
 
 struct WindowClass {
@@ -25,15 +30,17 @@ struct WindowClass {
 
 impl WindowClass {
     pub fn get() -> Rc<Self> {
-        let res = GLOBAL.window_class.borrow().upgrade();
-        match res {
-            Some(class) => class,
-            None => {
-                let res = Rc::new(Self::new());
-                GLOBAL.window_class.replace(Rc::downgrade(&res));
-                res
+        WINDOW_CLASS.with(|window_class| {
+            let res = window_class.borrow().upgrade();
+            match res {
+                Some(class) => class,
+                None => {
+                    let res = Rc::new(Self::new());
+                    window_class.replace(Rc::downgrade(&res));
+                    res
+                }
             }
-        }
+        })
     }
 
     fn new() -> Self {

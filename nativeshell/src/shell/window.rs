@@ -16,8 +16,9 @@ use super::{
     api_constants::*,
     api_model::{
         DragEffect, DragRequest, DragResult, DraggingInfo, HidePopupMenuRequest, PopupMenuRequest,
-        PopupMenuResponse, SetMenuRequest, WindowGeometry, WindowGeometryFlags,
-        WindowGeometryRequest, WindowStyle,
+        PopupMenuResponse, SetMenuRequest, WindowActivateRequest, WindowCollectionBehavior,
+        WindowDeactivateRequest, WindowGeometry, WindowGeometryFlags, WindowGeometryRequest,
+        WindowStateFlags, WindowStyle,
     },
     platform::window::PlatformWindow,
     Context, EngineHandle, MenuDelegate, WindowMethodCallReply, WindowMethodCallResult,
@@ -132,8 +133,16 @@ impl Window {
         self.platform_window().hide().map_err(|e| e.into())
     }
 
-    fn activate(&self) -> Result<bool> {
-        self.platform_window().activate().map_err(|e| e.into())
+    fn activate(&self, request: WindowActivateRequest) -> Result<bool> {
+        self.platform_window()
+            .activate(request.activate_application)
+            .map_err(|e| e.into())
+    }
+
+    fn deactivate(&self, request: WindowDeactivateRequest) -> Result<bool> {
+        self.platform_window()
+            .deactivate(request.deactivate_application)
+            .map_err(|e| e.into())
     }
 
     fn set_geometry(&self, geometry: WindowGeometryRequest) -> Result<WindowGeometryFlags> {
@@ -152,15 +161,49 @@ impl Window {
             .map_err(|e| e.into())
     }
 
+    fn get_screen_id(&self) -> Result<i64> {
+        self.platform_window().get_screen_id().map_err(|e| e.into())
+    }
+
     fn set_style(&self, style: WindowStyle) -> Result<()> {
         self.platform_window()
             .set_style(style)
             .map_err(|e| e.into())
     }
 
+    fn get_window_state_flags(&self) -> Result<WindowStateFlags> {
+        self.platform_window()
+            .get_window_state_flags()
+            .map_err(|e| e.into())
+    }
+
     fn set_title(&self, title: String) -> Result<()> {
         self.platform_window()
             .set_title(title)
+            .map_err(|e| e.into())
+    }
+
+    fn set_minimized(&self, minimized: bool) -> Result<()> {
+        self.platform_window()
+            .set_minimized(minimized)
+            .map_err(|e| e.into())
+    }
+
+    fn set_maximized(&self, maximized: bool) -> Result<()> {
+        self.platform_window()
+            .set_maximized(maximized)
+            .map_err(|e| e.into())
+    }
+
+    fn set_full_screen(&self, full_screen: bool) -> Result<()> {
+        self.platform_window()
+            .set_full_screen(full_screen)
+            .map_err(|e| e.into())
+    }
+
+    fn set_collection_behavior(&self, behavior: WindowCollectionBehavior) -> Result<()> {
+        self.platform_window()
+            .set_collection_behavior(behavior)
             .map_err(|e| e.into())
     }
 
@@ -300,7 +343,10 @@ impl Window {
                 return Self::reply(reply, &arg, |()| self.hide());
             }
             method::window::ACTIVATE => {
-                return Self::reply(reply, &arg, |()| self.activate());
+                return Self::reply(reply, &arg, |request| self.activate(request));
+            }
+            method::window::DEACTIVATE => {
+                return Self::reply(reply, &arg, |request| self.deactivate(request));
             }
             method::window::SET_GEOMETRY => {
                 return Self::reply(reply, &arg, |geometry| self.set_geometry(geometry));
@@ -311,11 +357,31 @@ impl Window {
             method::window::SUPPORTED_GEOMETRY => {
                 return Self::reply(reply, &arg, |()| self.supported_geometry());
             }
+            method::window::GET_SCREEN_ID => {
+                return Self::reply(reply, &arg, |()| self.get_screen_id());
+            }
             method::window::SET_STYLE => {
                 return Self::reply(reply, &arg, |style| self.set_style(style));
             }
+            method::window::GET_WINDOW_STATE_FLAGS => {
+                return Self::reply(reply, &arg, |()| self.get_window_state_flags());
+            }
             method::window::SET_TITLE => {
                 return Self::reply(reply, &arg, |title| self.set_title(title));
+            }
+            method::window::SET_MAXIMIZED => {
+                return Self::reply(reply, &arg, |v| self.set_maximized(v));
+            }
+            method::window::SET_MINIMIZED => {
+                return Self::reply(reply, &arg, |v| self.set_minimized(v));
+            }
+            method::window::SET_FULL_SCREEN => {
+                return Self::reply(reply, &arg, |v| self.set_full_screen(v));
+            }
+            method::window::SET_COLLECTION_BEHAVIOR => {
+                return Self::reply(reply, &arg, |behavior| {
+                    self.set_collection_behavior(behavior)
+                });
             }
             method::window::SAVE_POSITION_TO_STRING => {
                 return Self::reply(reply, &arg, |()| self.save_position_to_string());
@@ -361,6 +427,7 @@ pub trait PlatformWindowDelegate {
     fn visibility_changed(&self, visible: bool);
     fn did_request_close(&self);
     fn will_close(&self);
+    fn state_flags_changed(&self);
 
     fn dragging_exited(&self);
     fn dragging_updated(&self, info: &DraggingInfo);
@@ -384,6 +451,13 @@ impl PlatformWindowDelegate for Window {
         if let Some(context) = self.context.get() {
             self.broadcast_message(event::window::CLOSE, Value::Null);
             context.window_manager.borrow_mut().remove_window(self);
+        }
+    }
+
+    fn state_flags_changed(&self) {
+        let flags = self.platform_window.borrow().get_window_state_flags();
+        if let Ok(flags) = flags {
+            self.broadcast_message(event::window::STATE_FLAGS_CHANGED, to_value(flags).unwrap());
         }
     }
 

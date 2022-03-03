@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::codec::Value;
 
-use super::{HotKeyHandle, MenuHandle, Point, Rect, Size};
+use super::{status_item_manager::StatusItemHandle, HotKeyHandle, MenuHandle, Point, Rect, Size};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -71,6 +71,18 @@ impl WindowGeometryRequest {
 
         geometry
     }
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowActivateRequest {
+    pub activate_application: bool,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowDeactivateRequest {
+    pub deactivate_application: bool,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -185,7 +197,61 @@ pub struct WindowStyle {
     pub can_minimize: bool,
     pub can_maximize: bool,
     pub can_full_screen: bool,
+    pub always_on_top: bool,
+    pub always_on_top_level: Option<i64>,
     pub traffic_light_offset: Option<Point>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub enum BoolTransition {
+    No,
+    NoToYes,
+    Yes,
+    YesToNo,
+}
+
+impl Default for BoolTransition {
+    fn default() -> Self {
+        BoolTransition::No
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowStateFlags {
+    pub maximized: BoolTransition,
+    pub minimized: BoolTransition,
+    pub full_screen: BoolTransition,
+    pub active: bool,
+}
+
+impl WindowStateFlags {
+    pub fn is_minimized(&self) -> bool {
+        self.minimized == BoolTransition::Yes || self.minimized == BoolTransition::NoToYes
+    }
+    pub fn is_maximized(&self) -> bool {
+        self.maximized == BoolTransition::Yes || self.maximized == BoolTransition::NoToYes
+    }
+    pub fn is_full_screen(&self) -> bool {
+        self.full_screen == BoolTransition::Yes || self.full_screen == BoolTransition::NoToYes
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowCollectionBehavior {
+    pub can_join_all_spaces: bool,
+    pub move_to_active_space: bool,
+    pub managed: bool,
+    pub transient: bool,
+    pub stationary: bool,
+    pub participates_in_cycle: bool,
+    pub ignores_cycle: bool,
+    pub full_screen_primary: bool,
+    pub full_screen_auxiliary: bool,
+    pub full_screen_none: bool,
+    pub allows_tiling: bool,
+    pub disallows_tiling: bool,
 }
 
 //
@@ -195,6 +261,7 @@ pub struct WindowStyle {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum MenuItemRole {
+    About,
     Hide,
     HideOtherApplications,
     ShowAll,
@@ -328,4 +395,84 @@ pub struct HotKeyDestroyRequest {
 #[serde(rename_all = "camelCase")]
 pub struct HotKeyPressed {
     pub handle: HotKeyHandle,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Screen {
+    pub id: i64,
+    pub frame: Rect,
+    pub work_area: Rect,
+    pub scaling_factor: f64,
+}
+
+//
+// StatusItem
+//
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemCreateRequest {}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemDestroyRequest {
+    pub handle: StatusItemHandle,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemSetImageRequest {
+    pub handle: StatusItemHandle,
+    pub image: Vec<ImageData>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemSetHintRequest {
+    pub handle: StatusItemHandle,
+    pub hint: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemSetHighlightedRequest {
+    pub handle: StatusItemHandle,
+    pub highlighted: bool,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemShowMenuRequest {
+    pub handle: StatusItemHandle,
+    pub menu: MenuHandle,
+    pub offset: Point,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemGetGeometryRequest {
+    pub handle: StatusItemHandle,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemGetScreenIdRequest {
+    pub handle: StatusItemHandle,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StatusItemActionType {
+    LeftMouseDown,
+    LeftMouseUp,
+    RightMouseDown,
+    RightMouseUp,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusItemAction {
+    pub handle: StatusItemHandle,
+    pub action: StatusItemActionType,
+    pub position: Point,
 }

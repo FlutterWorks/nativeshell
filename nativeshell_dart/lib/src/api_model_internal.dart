@@ -1,7 +1,10 @@
 import 'dart:typed_data';
 import 'dart:ui';
+
 import 'api_model.dart';
 import 'menu.dart';
+import 'status_item.dart';
+import 'util.dart';
 
 class PopupMenuRequest {
   PopupMenuRequest({
@@ -24,6 +27,30 @@ class PopupMenuRequest {
         'trackingRect': trackingRect?.serialize(),
         'itemRect': itemRect?.serialize(),
         'preselectFirst': preselectFirst,
+      };
+}
+
+class WindowActivationRequest {
+  WindowActivationRequest({
+    required this.activateApplication,
+  });
+
+  final bool activateApplication;
+
+  dynamic serialize() => {
+        'activateApplication': activateApplication,
+      };
+}
+
+class WindowDeactivationRequest {
+  WindowDeactivationRequest({
+    required this.deactivateApplication,
+  });
+
+  final bool deactivateApplication;
+
+  dynamic serialize() => {
+        'deactivateApplication': deactivateApplication,
       };
 }
 
@@ -139,5 +166,33 @@ class KeyboardMap {
     final map = value as Map;
     final keys = map['keys'] as List;
     return KeyboardMap(keys: keys.map(KeyboardKey.deserialize).toList());
+  }
+}
+
+enum StatusItemActionType {
+  leftMouseDown,
+  leftMouseUp,
+  rightMouseDown,
+  rightMouseUp,
+}
+
+class StatusItemAction {
+  StatusItemAction({
+    required this.handle,
+    required this.action,
+    required this.position,
+  });
+
+  final StatusItemHandle handle;
+  final StatusItemActionType action;
+  final Offset position;
+
+  static StatusItemAction deserialize(dynamic value) {
+    final map = value as Map;
+    return StatusItemAction(
+      handle: StatusItemHandle(map['handle']),
+      action: enumFromString(StatusItemActionType.values, map['action']),
+      position: OffsetExt.deserialize(map['position']),
+    );
   }
 }

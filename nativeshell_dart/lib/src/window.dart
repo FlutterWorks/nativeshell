@@ -8,6 +8,7 @@ import 'api_model.dart';
 import 'api_model_internal.dart';
 import 'event.dart';
 import 'menu.dart';
+import 'screen.dart';
 import 'util.dart';
 import 'window_manager.dart';
 import 'window_method_channel.dart';
@@ -60,8 +61,18 @@ class Window {
     await _invokeMethod(Methods.windowHide);
   }
 
-  Future<bool> activate() async {
-    return await _invokeMethod(Methods.windowActivate);
+  Future<bool> activate({bool activateApplication = true}) async {
+    return await _invokeMethod(
+        Methods.windowActivate,
+        WindowActivationRequest(activateApplication: activateApplication)
+            .serialize());
+  }
+
+  Future<bool> deactivate({bool deactivateApplication = false}) async {
+    return await _invokeMethod(
+        Methods.windowDeactivate,
+        WindowDeactivationRequest(deactivateApplication: deactivateApplication)
+            .serialize());
   }
 
   Future<GeometryFlags> setGeometry(Geometry request,
@@ -83,6 +94,17 @@ class Window {
         await _invokeMethod(Methods.windowSupportedGeometry));
   }
 
+  // Screen might be null temporarily - this can happen when connecting or
+  // disconnecting displays.
+  Future<Screen?> getScreen() async {
+    final screenId = await _invokeMethod(Methods.windowGetScreenId) as int;
+    final screens = Screen.getAllScreens().cast<Screen?>();
+    return screens.firstWhere(
+      (screen) => screen!.id == screenId,
+      orElse: () => null,
+    );
+  }
+
   Future<void> setTitle(String title) {
     return _invokeMethod(Methods.windowSetTitle, title);
   }
@@ -97,6 +119,45 @@ class Window {
 
   Future<void> restorePositionFromString(String position) async {
     return _invokeMethod(Methods.windowRestorePositionFromString, position);
+  }
+
+  Future<WindowStateFlags> getWindowStateFlags() async {
+    return WindowStateFlags.deserialize(
+        await _invokeMethod(Methods.windowGetWindowStateFlags));
+  }
+
+  /// If [minimized] is `true` and window is currently not minimized, minimizes
+  /// the window.
+  ///
+  /// If [minimized] is `false` and window is currently minimized, unminimizes
+  /// the window.
+  Future<void> setMinimized(bool minimized) async {
+    await _invokeMethod(Methods.windowSetMinimized, minimized);
+  }
+
+  /// If [maximized] is `true` and window is currently not maximized, maximizes
+  /// the window.
+  ///
+  /// If [maximized] is `false` and window is currently maximized, restores the
+  /// original size.
+  Future<void> setMaximized(bool maximized) async {
+    await _invokeMethod(Methods.windowSetMaximized, maximized);
+  }
+
+  /// If [fullScreen] is `true` and window is currently not full screen, toggles
+  /// fullscreen mode. Only applicable on platforms that support full screen
+  /// modes.
+  ///
+  /// If [fullScreen] is `false` and window is currently full screen, restores
+  /// original window size.
+  Future<void> setFullScreen(bool fullScreen) async {
+    await _invokeMethod(Methods.windowSetFullScreen, fullScreen);
+  }
+
+  // MacOS specific;
+  Future<void> setCollectionBehavior(WindowCollectionBehavior behavior) {
+    return _invokeMethod(
+        Methods.windowSetCollectionBehavior, behavior.serialize());
   }
 
   static LocalWindow of(BuildContext context) => WindowState.of(context).window;
@@ -121,6 +182,7 @@ class Window {
   final visibilityChangedEvent = Event<bool>();
   final closeRequestEvent = VoidEvent();
   final closeEvent = VoidEvent();
+  final windowStateFlagsEvent = Event<WindowStateFlags>();
 
   void onMessage(String message, dynamic arguments) {
     if (message == Events.windowInitialize) {
@@ -136,6 +198,9 @@ class Window {
     } else if (message == Events.windowClose) {
       WindowManager.instance.windowClosed(this);
       closeEvent.fire();
+    } else if (message == Events.WindowStateFlagsChanged) {
+      final stateFlags = WindowStateFlags.deserialize(arguments);
+      windowStateFlagsEvent.fire(stateFlags);
     }
   }
 

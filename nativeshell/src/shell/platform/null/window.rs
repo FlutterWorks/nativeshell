@@ -4,8 +4,9 @@ use crate::{
     codec::Value,
     shell::{
         api_model::{
-            DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse, WindowGeometry,
-            WindowGeometryFlags, WindowGeometryRequest, WindowStyle,
+            DragEffect, DragRequest, PopupMenuRequest, PopupMenuResponse, WindowCollectionBehavior,
+            WindowGeometry, WindowGeometryFlags, WindowGeometryRequest, WindowStateFlags,
+            WindowStyle,
         },
         Context, PlatformWindowDelegate,
     },
@@ -57,7 +58,11 @@ impl PlatformWindow {
         Err(PlatformError::NotImplemented)
     }
 
-    pub fn activate(&self) -> PlatformResult<bool> {
+    pub fn activate(&self, activate_application: bool) -> PlatformResult<bool> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn deactivate(&self, deactivate_application: bool) -> PlatformResult<bool> {
         Err(PlatformError::NotImplemented)
     }
 
@@ -83,7 +88,34 @@ impl PlatformWindow {
         Err(PlatformError::NotImplemented)
     }
 
+    pub fn get_screen_id(&self) -> PlatformResult<i64> {
+        Err(PlatformError::NotImplemented)
+    }
+
     pub fn set_title(&self, title: String) -> PlatformResult<()> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn set_collection_behavior(
+        &self,
+        behavior: WindowCollectionBehavior,
+    ) -> PlatformResult<()> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn set_minimized(&self, minimized: bool) -> PlatformResult<()> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn set_maximized(&self, maximized: bool) -> PlatformResult<()> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn set_full_screen(&self, full_screen: bool) -> PlatformResult<()> {
+        Err(PlatformError::NotImplemented)
+    }
+
+    pub fn get_window_state_flags(&self) -> PlatformResult<WindowStateFlags> {
         Err(PlatformError::NotImplemented)
     }
 

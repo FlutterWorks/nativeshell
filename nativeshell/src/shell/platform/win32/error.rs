@@ -5,8 +5,9 @@ pub enum PlatformError {
     UnknownError,
     LaunchEngineFailure,
     SendMessageFailure { channel: String },
-    WindowsError(windows::Error),
+    WindowsError(windows::core::Error),
     NotAvailable,
+    OffsetOutOfScreenBounds,
     OtherError { error: String },
 }
 
@@ -28,6 +29,9 @@ impl Display for PlatformError {
             PlatformError::NotAvailable => {
                 write!(f, "Feature is not available")
             }
+            PlatformError::OffsetOutOfScreenBounds => {
+                write!(f, "Given offset is out of screen bounds")
+            }
             PlatformError::OtherError { error } => {
                 write!(f, "{}", error)
             }
@@ -37,8 +41,8 @@ impl Display for PlatformError {
 
 impl std::error::Error for PlatformError {}
 
-impl From<windows::Error> for PlatformError {
-    fn from(src: windows::Error) -> PlatformError {
+impl From<windows::core::Error> for PlatformError {
+    fn from(src: windows::core::Error) -> PlatformError {
         PlatformError::WindowsError(src)
     }
 }

@@ -18,6 +18,12 @@ pub(crate) mod channel {
 
     // Flutter channel for managing hot keys
     pub const HOT_KEY_MANAGER: &str = "nativeshell/hot-key-manager";
+
+    // Flutter channel for screens
+    pub const SCREEN_MANAGER: &str = "nativeshell/screen-manager";
+
+    // Flutter channel for managing status items
+    pub const STATUS_ITEM_MANAGER: &str = "nativeshell/status-item-manager";
 }
 
 pub const CURRENT_API_VERSION: i32 = 1;
@@ -51,6 +57,9 @@ pub(crate) mod method {
         // Bring window front and request focus
         pub const ACTIVATE: &str = "Window.activate";
 
+        // Unfocus window
+        pub const DEACTIVATE: &str = "Window.deactivate";
+
         // Close the window; This will terminate the isolate
         pub const CLOSE: &str = "Window.close";
 
@@ -61,9 +70,15 @@ pub(crate) mod method {
         pub const SET_GEOMETRY: &str = "Window.setGeometry";
         pub const GET_GEOMETRY: &str = "Window.getGeometry";
         pub const SUPPORTED_GEOMETRY: &str = "Window.supportedGeometry";
+        pub const GET_SCREEN_ID: &str = "Window.getScreenId";
 
         pub const SET_STYLE: &str = "Window.setStyle";
         pub const SET_TITLE: &str = "Window.setTitle";
+        pub const SET_MINIMIZED: &str = "Window.setMinimized";
+        pub const SET_MAXIMIZED: &str = "Window.setMaximized";
+        pub const SET_FULL_SCREEN: &str = "Window.setFullScreen";
+        pub const SET_COLLECTION_BEHAVIOR: &str = "Window.setCollectionBehavior";
+        pub const GET_WINDOW_STATE_FLAGS: &str = "Window.getWindowStateFlags";
         pub const PERFORM_WINDOW_DRAG: &str = "Window.performWindowDrag";
 
         pub const SHOW_POPUP_MENU: &str = "Window.showPopupMenu";
@@ -115,6 +130,27 @@ pub(crate) mod method {
         pub const DESTROY: &str = "HotKey.destroy";
         pub const ON_PRESSED: &str = "HotKey.onPressed";
     }
+
+    pub mod screen_manager {
+        pub const SCREENS_CHANGED: &str = "ScreenManager.screensChanged";
+        pub const GET_SCREENS: &str = "ScreenManager.getScreens";
+        pub const GET_MAIN_SCREEN: &str = "ScreenManager.getMainScreen";
+        pub const LOGICAL_TO_SYSTEM: &str = "ScreenManager.logicalToSystem";
+        pub const SYSTEM_TO_LOGICAL: &str = "ScreenManager.systemToLogical";
+    }
+
+    pub mod status_item {
+        pub const INIT: &str = "StatusItem.init";
+        pub const CREATE: &str = "StatusItem.create";
+        pub const DESTROY: &str = "StatusItem.destroy";
+        pub const SET_IMAGE: &str = "StatusItem.setImage";
+        pub const SET_HINT: &str = "StatusItem.setHint";
+        pub const SHOW_MENU: &str = "StatusItem.showMenu";
+        pub const SET_HIGHLIGHTED: &str = "StatusItem.setHighlighted";
+        pub const GET_GEOMETRY: &str = "StatusItem.getGeometry";
+        pub const GET_SCREEN_ID: &str = "StatusItem.getScreenId";
+        pub const ON_ACTION: &str = "StatusItem.onAction";
+    }
 }
 
 pub(crate) mod event {
@@ -124,6 +160,9 @@ pub(crate) mod event {
 
         // Called when window became visible or hidden (boolean argument)
         pub const VISIBILITY_CHANGED: &str = "event:Window.visibilityChanged";
+
+        // Called when window state flags have changed
+        pub const STATE_FLAGS_CHANGED: &str = "event:Window.stateFlagsChanged";
 
         // Delivered when user requested closing the window; Target window is responsible
         // for actually closing the window
