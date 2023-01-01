@@ -142,7 +142,7 @@ end\n";
         writeln!(contents, "  end").unwrap();
         writeln!(contents, "end").unwrap();
 
-        if file.exists() && fs::read_to_string(&file)? == contents {
+        if file.exists() && fs::read_to_string(file)? == contents {
             return Ok(true);
         }
 
@@ -190,6 +190,8 @@ end\n";
                 .arg("-verbose")
                 .arg("-workspace")
                 .arg("DummyProject.xcworkspace")
+                .arg("-derivedDataPath")
+                .arg("DerivedData")
                 .arg("-scheme")
                 .arg("DummyProject")
                 .arg("-destination")
@@ -332,7 +334,7 @@ end\n";
         use tar::Archive;
         let mut archive = Archive::new(project as &[u8]);
         archive
-            .unpack(&path)
+            .unpack(path)
             .wrap_error(FileOperation::Unarchive, || path.into())?;
         Ok(())
     }

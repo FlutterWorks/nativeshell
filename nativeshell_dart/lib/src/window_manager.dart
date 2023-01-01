@@ -158,11 +158,29 @@ class _LocalWindow extends LocalWindow {
     WindowHandle handle, {
     WindowHandle? parentWindow,
     dynamic initData,
-  }) : super(handle, parentWindow: parentWindow, initData: initData);
+  }) : super(handle, parentWindow: parentWindow, initData: initData) {
+    visibilityChangedEvent.addListener(_visibilityChanged);
+  }
 
   WindowState? _currentState;
 
-  bool _shown = false;
+  bool _visible = false;
+
+  void _updatePause() {
+    if (!_visible && !_paused) {
+      _pushPause();
+      _paused = true;
+    } else if (_visible && _paused) {
+      _popPause();
+      _paused = false;
+    }
+  }
+
+  void _visibilityChanged(bool visible) {
+    _visible = visible;
+    _updatePause();
+  }
+
   bool _paused = false;
 
   final _dragDriver = _WindowDragDriver();
@@ -178,35 +196,11 @@ class _LocalWindow extends LocalWindow {
 
   @override
   Future<void> readyToShow() {
-    // ignore: unnecessary_non_null_assertion
-    SchedulerBinding.instance!.addPostFrameCallback((_) {
-      if (!_paused && !_shown) {
-        _pushPause();
-        _paused = true;
-      }
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _updatePause();
     });
 
     return super.readyToShow();
-  }
-
-  @override
-  Future<void> show() {
-    _shown = true;
-    if (_paused) {
-      _popPause();
-      _paused = false;
-    }
-    return super.show();
-  }
-
-  @override
-  Future<void> hide() {
-    _shown = false;
-    if (!_paused) {
-      _paused = true;
-      _pushPause();
-    }
-    return super.hide();
   }
 
   @override
@@ -220,8 +214,7 @@ int _pauseCount = 0;
 void _pushPause() {
   ++_pauseCount;
   if (_pauseCount > 0) {
-    // ignore: unnecessary_non_null_assertion
-    WidgetsBinding.instance!
+    WidgetsBinding.instance
         .handleAppLifecycleStateChanged(AppLifecycleState.paused);
   }
 }
@@ -230,8 +223,7 @@ void _popPause() {
   assert(_pauseCount > 0);
   --_pauseCount;
   if (_pauseCount == 0) {
-    // ignore: unnecessary_non_null_assertion
-    WidgetsBinding.instance!
+    WidgetsBinding.instance
         .handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   }
 }

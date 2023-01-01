@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     io::Write,
     path::Path,
@@ -59,7 +60,7 @@ impl<'a> PluginsImpl<'a> {
 
         let mut cmakelist: String = include_str!("res/windows/CMakeLists.txt").into();
         for plugin in plugins {
-            cmakelist.push_str(&format!("add_subdirectory(\"flutter/{}\")\n", plugin.name));
+            writeln!(cmakelist, "add_subdirectory(\"flutter/{}\")", plugin.name).ok();
         }
 
         let cmakelist_path = plugins_dir.join("CMakeLists.txt");
@@ -82,7 +83,7 @@ impl<'a> PluginsImpl<'a> {
                 .join("build")
                 .join("flutter")
                 .join(&plugin.name)
-                .join(&configuration);
+                .join(configuration);
 
             for entry in fs::read_dir(&plugin_artifacts_path)
                 .wrap_error(FileOperation::ReadDir, || plugin_artifacts_path.clone())?
