@@ -32,7 +32,7 @@ impl<'a> PluginsImpl<'a> {
         let xcode = mkdir(&self.build.out_dir, Some("xcode"))?;
         let symlinks_dir = self.create_plugin_symlinks(&xcode, plugins)?;
         let framework_dir = mkdir(&xcode, Some("FlutterMacOS"))?;
-        let podfile = xcode.join("PodFile");
+        let podfile = xcode.join("Podfile");
         let build_ok = xcode.join("build_ok");
         let mut skip_build = self
             .write_podfile(&podfile, plugins, &symlinks_dir, &framework_dir)
@@ -78,7 +78,7 @@ impl<'a> PluginsImpl<'a> {
   s.license          = { :type => 'MIT' }\n\
   s.author           = { 'Flutter Dev Team' => 'flutter-dev@googlegroups.com' }\n\
   s.source           = { :git => 'https://github.com/flutter/engine', :tag => s.version.to_s }\n\
-  s.osx.deployment_target = '10.11'\n\
+  s.osx.deployment_target = '10.14'\n\
   s.vendored_frameworks = 'FlutterMacOS.framework'\n\
 end\n";
         let podspec_file = folder.join("FlutterMacOS.podspec");
@@ -91,7 +91,7 @@ end\n";
         let src = src
             .canonicalize()
             .wrap_error(FileOperation::Canonicalize, || src.clone())?;
-        symlink(&src, &dst)?;
+        symlink(src, &dst)?;
         Ok(())
     }
 
@@ -133,7 +133,7 @@ end\n";
         }
 
         for pod in self.build.options.macos_extra_pods {
-            writeln!(contents, "  {}", pod).unwrap();
+            writeln!(contents, "  {pod}").unwrap();
         }
 
         writeln!(contents, "  target 'DummyProject' do").unwrap();
@@ -269,6 +269,8 @@ end\n";
                 .join("Headers")
                 .join(format!("{}-Swift.h", plugin.name));
 
+            let mut found_swift_plugin = false;
+
             if swift_header_path.exists() {
                 let file = File::open(&swift_header_path)
                     .wrap_error(FileOperation::Open, || swift_header_path.clone())?;
@@ -281,12 +283,15 @@ end\n";
                             // the of suffix of mangled name should match plugin class
                             if line.ends_with(&plugin.platform_info.plugin_class) {
                                 res.insert(plugin.platform_info.plugin_class.clone(), line.into());
+                                found_swift_plugin = true;
                                 break;
                             }
                         }
                     }
                 }
-            } else {
+            }
+
+            if !found_swift_plugin {
                 // possibly not a swift plugin
                 res.insert(
                     plugin.platform_info.plugin_class.clone(),

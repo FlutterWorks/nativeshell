@@ -20,9 +20,10 @@ use crate::{
 };
 use cocoa::{
     appkit::{
-        CGPoint, NSApplication, NSEvent, NSEventType, NSView, NSViewHeightSizable,
-        NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
-        NSWindowTabbingMode, NSWindowTitleVisibility,
+        CGPoint, NSApplication, NSColor, NSEvent, NSEventPhase,
+        NSEventType::{self, NSEventTypeMagnify, NSEventTypeRotate},
+        NSView, NSViewHeightSizable, NSViewWidthSizable, NSWindow, NSWindowCollectionBehavior,
+        NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
     },
     base::{id, nil, BOOL, NO, YES},
     foundation::{
@@ -30,7 +31,7 @@ use cocoa::{
     },
 };
 use core_foundation::base::CFRelease;
-use core_graphics::event::CGEventType;
+use core_graphics::event::{CGEventField, CGEventType};
 use objc::{
     class,
     declare::ClassDecl,
@@ -74,6 +75,7 @@ pub struct PlatformWindow {
     mouse_dragged: Cell<bool>,
     window_state_flags: RefCell<WindowStateFlags>,
     window_dragging: Cell<bool>,
+    notify_geometry_changes: Cell<bool>,
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -137,6 +139,7 @@ impl PlatformWindow {
                 mouse_dragged: Cell::new(false),
                 window_state_flags: RefCell::new(WindowStateFlags::default()),
                 window_dragging: Cell::new(false),
+                notify_geometry_changes: Cell::new(false),
             }
         })
     }
@@ -153,6 +156,11 @@ impl PlatformWindow {
 
             let state_ptr = weak.clone().into_raw() as *mut c_void;
             (**self.platform_window).set_ivar("imState", state_ptr);
+
+            let () = msg_send![
+                *engine.view_controller,
+                setBackgroundColor: NSColor::clearColor(nil)
+            ];
 
             let flutter_view: id = msg_send![*engine.view_controller, view];
             self.flutter_view.set(StrongPtr::retain(flutter_view));
@@ -183,6 +191,8 @@ impl PlatformWindow {
             drag_context.register(*self.platform_window);
             self.drag_context.set(drag_context);
         }
+
+        self.notify_geometry_changes.replace(true);
     }
 
     pub fn get_platform_window(&self) -> PlatformWindowType {
@@ -464,6 +474,13 @@ impl PlatformWindow {
             }
             NSWindow::setCollectionBehavior_(*self.platform_window, collection_behavior);
 
+            // Workaround for  NSWindowStyleMaskFullScreen cleared on a window outside of a full screen transition.
+            // Make sure to preserve the full screen mask.
+            let current_mask = NSWindow::styleMask(*self.platform_window);
+            if current_mask.contains(NSWindowStyleMask::NSFullScreenWindowMask) {
+                mask |= NSWindowStyleMask::NSFullScreenWindowMask;
+            }
+
             NSWindow::setStyleMask_(*self.platform_window, mask);
 
             NSWindow::setLevel_(
@@ -740,6 +757,45 @@ impl PlatformWindow {
         Ok(true)
     }
 
+    unsafe fn finish_momentum_events(&self) {
+        // Unfinished momentum events will cause pan gesture recognizer
+        // stuck since Flutter 3.3
+        let momentum_events: Vec<_> = self
+            .last_event
+            .borrow_mut()
+            .values()
+            .filter(|e| {
+                if e.eventType() == NSEventType::NSScrollWheel
+                    || e.eventType() == NSEventTypeMagnify
+                    || e.eventType() == NSEventTypeRotate
+                {
+                    let phase = e.phase();
+                    phase != NSEventPhase::NSEventPhaseNone
+                        && phase != NSEventPhase::NSEventPhaseEnded
+                        && phase != NSEventPhase::NSEventPhaseCancelled
+                } else {
+                    false
+                }
+            })
+            .cloned()
+            .collect();
+
+        for event in momentum_events {
+            let event = NSEvent::CGEvent(*event) as core_graphics::sys::CGEventRef;
+            let event = CGEventCreateCopy(event);
+            CGEventSetIntegerValueField(
+                event, //
+                99,    // kCGScrollWheelEventScrollPhase
+                NSEventPhase::NSEventPhaseEnded.bits() as i64,
+            );
+
+            let synthetized: id = msg_send![class!(NSEvent), eventWithCGEvent: event];
+            CFRelease(event as *mut _);
+
+            let () = msg_send![*self.platform_window, sendEvent: synthetized];
+        }
+    }
+
     unsafe fn synthetize_mouse_up_event(&self) {
         let last_event = self
             .last_event
@@ -771,6 +827,8 @@ impl PlatformWindow {
 
             let () = msg_send![*self.platform_window, sendEvent: synthetized];
         }
+
+        self.finish_momentum_events();
     }
 
     pub(super) fn synthetize_mouse_move_if_needed(&self) {
@@ -1135,6 +1193,11 @@ static WINDOW_DELEGATE_CLASS: Lazy<&'static Class> = Lazy::new(|| unsafe {
     );
 
     decl.add_method(
+        sel!(windowDidResize:),
+        window_did_resize as extern "C" fn(&Object, Sel, id),
+    );
+
+    decl.add_method(
         sel!(windowShouldClose:),
         window_should_close as extern "C" fn(&Object, Sel, id) -> BOOL,
     );
@@ -1250,11 +1313,28 @@ extern "C" {
     fn CGEventSetType(event: core_graphics::sys::CGEventRef, eventType: CGEventType);
     fn CGEventSetLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
     fn CGEventSetWindowLocation(event: core_graphics::sys::CGEventRef, location: CGPoint);
+    fn CGEventSetIntegerValueField(
+        event: core_graphics::sys::CGEventRef,
+        field: CGEventField,
+        value: i64,
+    );
     fn CGEventCreateCopy(event: core_graphics::sys::CGEventRef) -> core_graphics::sys::CGEventRef;
 }
 
 extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
-    with_state_delegate(this, |_state, _delegate| {});
+    with_state_delegate(this, |state, delegate| {
+        if state.notify_geometry_changes.get() {
+            delegate.geometry_changed();
+        }
+    });
+}
+
+extern "C" fn window_did_resize(this: &Object, _: Sel, _: id) {
+    with_state_delegate(this, |state, delegate| {
+        if state.notify_geometry_changes.get() {
+            delegate.geometry_changed();
+        }
+    });
 }
 
 extern "C" fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {

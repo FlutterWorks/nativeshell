@@ -73,7 +73,7 @@ impl MacOSBundle {
 
         symlink(
             artifacts_dir.join(&self.options.executable_path),
-            &bundle_executable_path,
+            bundle_executable_path,
         )?;
 
         self.write_info_plist(&contents)?;
@@ -137,7 +137,7 @@ impl MacOSBundle {
     }
 
     fn replace_plist_value(plist: &mut String, key: &str, value: &str) {
-        *plist = plist.replace(&format!("${{{}}}", key), value);
+        *plist = plist.replace(&format!("${{{key}}}"), value);
     }
 
     fn get_info_plist_template(&self) -> BuildResult<String> {

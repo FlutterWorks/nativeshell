@@ -183,6 +183,15 @@ class Window {
   final closeRequestEvent = VoidEvent();
   final closeEvent = VoidEvent();
   final windowStateFlagsEvent = Event<WindowStateFlags>();
+  final geometryChangedEvent = Event<Geometry>();
+
+  void dispose() {
+    visibilityChangedEvent.dispose();
+    closeRequestEvent.dispose();
+    closeEvent.dispose();
+    windowStateFlagsEvent.dispose();
+    geometryChangedEvent.dispose();
+  }
 
   void onMessage(String message, dynamic arguments) {
     if (message == Events.windowInitialize) {
@@ -201,6 +210,9 @@ class Window {
     } else if (message == Events.WindowStateFlagsChanged) {
       final stateFlags = WindowStateFlags.deserialize(arguments);
       windowStateFlagsEvent.fire(stateFlags);
+    } else if (message == Events.WindowGeometryChanged) {
+      final geometry = Geometry.deserialize(arguments);
+      geometryChangedEvent.fire(geometry);
     }
   }
 

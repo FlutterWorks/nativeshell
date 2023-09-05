@@ -71,6 +71,7 @@ fn hash_map<H: std::hash::Hasher>(map: &HashMap<Value, Value>, state: &mut H) {
     }
 }
 
+#[allow(renamed_and_removed_lints)]
 #[allow(clippy::derive_hash_xor_eq)]
 impl std::hash::Hash for Value {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
@@ -102,7 +103,7 @@ pub enum ValueError {
 impl fmt::Display for ValueError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ValueError::Message(s) => write!(f, "{}", s),
+            ValueError::Message(s) => write!(f, "{s}"),
             ValueError::ConversionError => write!(f, "Value can't be converted to target type"),
             ValueError::WrongType => write!(f, "Value is of wrong type"),
             ValueError::NoList => write!(f, "Value is not a list"),

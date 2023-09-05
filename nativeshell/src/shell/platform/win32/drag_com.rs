@@ -1,5 +1,5 @@
 // in generated code
-#![allow(clippy::forget_copy)]
+#![allow(forgetting_copy_types)]
 #![allow(clippy::useless_transmute)]
 #![allow(unused_must_use)]
 
@@ -474,7 +474,7 @@ impl DropSource {
     ) -> ::windows::core::HRESULT {
         if f_escape_pressed.as_bool() {
             DRAGDROP_S_CANCEL
-        } else if grf_key_state & MK_LBUTTON as u32 == 0 {
+        } else if grf_key_state & MK_LBUTTON == 0 {
             DRAGDROP_S_DROP
         } else {
             S_OK

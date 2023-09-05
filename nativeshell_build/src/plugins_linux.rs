@@ -37,7 +37,7 @@ impl<'a> PluginsImpl<'a> {
         let plugins_dir = mkdir(&self.build.out_dir, Some("plugins"))?;
         let flutter_files = ["flutter_linux", "libflutter_linux_gtk.so"];
         for file in &flutter_files {
-            copy_to(&flutter_artifacts.join(file), &plugins_dir, true)?;
+            copy_to(flutter_artifacts.join(file), &plugins_dir, true)?;
         }
 
         let flutter = mkdir(&plugins_dir, Some("flutter"))?;
@@ -77,6 +77,7 @@ impl<'a> PluginsImpl<'a> {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if let Some(name) = name.strip_suffix(".so") {
+                    #[allow(clippy::needless_borrow)] // false positive
                     copy_to(entry.path(), &artifacts_dir, true)?;
                     let name = name.strip_prefix("lib").unwrap();
                     cargo_emit::rustc_link_lib! {
@@ -111,7 +112,7 @@ impl<'a> PluginsImpl<'a> {
                 .plugin_class
                 .from_case(Case::Pascal)
                 .to_case(Case::Snake);
-            writeln!(file, "  extern \"C\" {{ pub fn {}_register_with_registrar(registrar: *mut std::os::raw::c_void); }}", snake_case_class)?;
+            writeln!(file, "  extern \"C\" {{ pub fn {snake_case_class}_register_with_registrar(registrar: *mut std::os::raw::c_void); }}")?;
         }
 
         writeln!(file, "  vec![")?;
@@ -121,8 +122,7 @@ impl<'a> PluginsImpl<'a> {
             writeln!(
                 file,
                 "    nativeshell::shell::platform::engine::PlatformPlugin {{ \
-                name: \"{}\".into(), register_func: Some({}_register_with_registrar) }},",
-                class, snake_case_class,
+                name: \"{class}\".into(), register_func: Some({snake_case_class}_register_with_registrar) }},",
             )?;
         }
 
