@@ -78,7 +78,7 @@ impl<'a> PluginsImpl<'a> {
   s.license          = { :type => 'MIT' }\n\
   s.author           = { 'Flutter Dev Team' => 'flutter-dev@googlegroups.com' }\n\
   s.source           = { :git => 'https://github.com/flutter/engine', :tag => s.version.to_s }\n\
-  s.osx.deployment_target = '10.14'\n\
+  s.osx.deployment_target = '10.15'\n\
   s.vendored_frameworks = 'FlutterMacOS.framework'\n\
 end\n";
         let podspec_file = folder.join("FlutterMacOS.podspec");
@@ -123,11 +123,12 @@ end\n";
 
         for plugin in plugins {
             let plugin_path = symlinks_dir.join(&plugin.name);
+            let platform_name = plugin.platform_path.file_name().unwrap();
             writeln!(
                 contents,
                 "  pod '{}', :path => '{}'",
                 plugin.name,
-                plugin_path.join(&plugin.platform_name).to_string_lossy()
+                plugin_path.join(platform_name).to_string_lossy()
             )
             .unwrap();
         }
@@ -263,6 +264,10 @@ end\n";
         // Swift class names are mangled. Try to extract mangled name from <plugin_name>-Swift.h
         // objc compatibility header
         for plugin in plugins {
+            let Some(plugin_class) = plugin.platform_info.plugin_class.clone() else {
+                continue;
+            };
+
             let swift_header_path = product_path
                 .join(&plugin.name)
                 .join(format!("{}.framework", plugin.name))
@@ -281,8 +286,8 @@ end\n";
                     if let Some(line) = line.strip_prefix("SWIFT_CLASS(\"") {
                         if let Some(line) = line.strip_suffix("\")") {
                             // the of suffix of mangled name should match plugin class
-                            if line.ends_with(&plugin.platform_info.plugin_class) {
-                                res.insert(plugin.platform_info.plugin_class.clone(), line.into());
+                            if line.ends_with(&plugin_class) {
+                                res.insert(plugin_class.clone(), line.into());
                                 found_swift_plugin = true;
                                 break;
                             }
@@ -293,10 +298,7 @@ end\n";
 
             if !found_swift_plugin {
                 // possibly not a swift plugin
-                res.insert(
-                    plugin.platform_info.plugin_class.clone(),
-                    plugin.platform_info.plugin_class.clone(),
-                );
+                res.insert(plugin_class.clone(), plugin_class.clone());
             }
         }
 

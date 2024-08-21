@@ -188,7 +188,7 @@ extern "system" fn enum_monitors(
                 rect.right - rect.left,
                 rect.bottom - rect.top,
             ),
-            scale: FlutterDesktopGetDpiForMonitor(hmonitor.0) as f64 / 96.0,
+            scale: FlutterDesktopGetDpiForMonitor(hmonitor.0 as _) as f64 / 96.0,
             handle: hmonitor,
         });
     }
@@ -209,7 +209,7 @@ fn displays_from_system() -> Vec<PhysicalDisplay> {
 }
 
 thread_local! {
-    static DISPLAYS: RefCell<Option<Displays>> = RefCell::new(None);
+    static DISPLAYS: RefCell<Option<Displays>> = const { RefCell::new(None) };
     static AUX_STATE: RefCell<AuxState> = RefCell::new(AuxState::new());
 }
 
@@ -255,7 +255,7 @@ impl Work {
 
     // move physical displays so that minimum is at 0 0
     fn adjust(&mut self) {
-        let mut min = (std::i32::MAX, std::i32::MAX);
+        let mut min = (i32::MAX, i32::MAX);
         for d in &mut self.state {
             min.0 = cmp::min(min.0, d.original.physical.x);
             min.1 = cmp::min(min.1, d.original.physical.y);

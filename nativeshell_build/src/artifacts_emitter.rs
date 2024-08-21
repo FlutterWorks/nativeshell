@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     util::{copy, copy_to, mkdir},
-    BuildError, BuildResult, FileOperation, Flutter, IOResultExt,
+    BuildError, BuildResult, FileOperation, Flutter, IOResultExt, TargetOS,
 };
 
 pub(super) struct ArtifactsEmitter<'a> {
@@ -13,6 +13,7 @@ pub(super) struct ArtifactsEmitter<'a> {
     flutter_out_dir: PathBuf,
     flutter_build_dir: PathBuf,
     artifacts_out_dir: PathBuf,
+    is_local_engine: bool,
 }
 
 impl<'a> ArtifactsEmitter<'a> {
@@ -20,12 +21,14 @@ impl<'a> ArtifactsEmitter<'a> {
         build: &'a Flutter,
         flutter_out_dir: P,
         artifacts_out_dir: P,
+        is_local_engine: bool,
     ) -> Result<Self, BuildError> {
         Ok(Self {
             build,
             flutter_out_dir: flutter_out_dir.as_ref().into(),
             flutter_build_dir: Self::find_flutter_build_dir(flutter_out_dir)?,
             artifacts_out_dir: artifacts_out_dir.as_ref().into(),
+            is_local_engine,
         })
     }
 
@@ -97,10 +100,54 @@ impl<'a> ArtifactsEmitter<'a> {
         Ok(())
     }
 
+    pub fn emit_native_assets(&self, target_os: &TargetOS) -> BuildResult<()> {
+        let os_dir: &str = match target_os {
+            TargetOS::Mac => "macos",
+            TargetOS::Windows => "windows",
+            TargetOS::Linux => "linux",
+        };
+        let source_dir = self
+            .flutter_out_dir
+            .join("build")
+            .join("native_assets")
+            .join(os_dir);
+        if source_dir.exists() {
+            let dest_dir = self.artifacts_out_dir.join("native_assets");
+            copy(&source_dir, &dest_dir, true)?;
+
+            let artifacts_out_dir = {
+                if cfg!(target_os = "linux") {
+                    // RUNPATH is set to $origin/lib
+                    mkdir(&self.artifacts_out_dir, Some("lib"))?
+                } else {
+                    self.artifacts_out_dir.clone()
+                }
+            };
+
+            // copy individual files / frameworks
+            for entry in
+                fs::read_dir(&dest_dir).wrap_error(FileOperation::ReadDir, || dest_dir.clone())?
+            {
+                let entry = entry.wrap_error(FileOperation::Read, || dest_dir.clone())?;
+                let entry_path = entry.path();
+                copy_to(entry_path, &artifacts_out_dir, true)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn emit_external_libraries(&self) -> BuildResult<()> {
+        let flutter_artifacts = self.find_artifacts_location(self.build.build_mode.as_str())?;
+
         let files = {
             if cfg!(target_os = "macos") {
-                vec!["FlutterMacOS.framework"]
+                if !self.is_local_engine
+                    && flutter_artifacts.join("FlutterMacOS.xcframework").exists()
+                {
+                    vec!["FlutterMacOS.xcframework/macos-arm64_x86_64/FlutterMacOS.framework"]
+                } else {
+                    vec!["FlutterMacOS.framework"]
+                }
             } else if cfg!(target_os = "windows") {
                 vec![
                     "flutter_windows.dll",
@@ -124,10 +171,9 @@ impl<'a> ArtifactsEmitter<'a> {
         };
 
         let deps_out_dir = self.artifacts_out_dir.join("deps");
-        let flutter_artifacts = self.find_artifacts_location(self.build.build_mode.as_str())?;
         let flutter_artifacts_debug = self.find_artifacts_location("debug")?;
         for file in files {
-            // on linux the unstripped libraries in local engien build are in
+            // on linux the unstripped libraries in local engine build are in
             // lib.unstripped folder; so if unstripped version exists we prefer that
             let unstripped = flutter_artifacts.join("lib.unstripped").join(file);
             let src = if unstripped.exists() {

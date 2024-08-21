@@ -33,6 +33,9 @@ pub struct FlutterOptions<'a> {
     // Name of local engine
     pub local_engine: Option<&'a str>,
 
+    // Name of local engine for host platform
+    pub local_engine_host: Option<&'a str>,
+
     // Source path of local engine. If not specified, NativeShell will try to locate
     // it relative to flutter path.
     pub local_engine_src_path: Option<&'a Path>,
@@ -45,6 +48,9 @@ pub struct FlutterOptions<'a> {
     // macOS: Allow specifying extra pods to be built in addition to pods from
     // Flutter plugins. For example: macos_extra_pods: &["pod 'Sparkle'"],
     pub macos_extra_pods: &'a [&'a str],
+
+    // Whether to output linker flags for settings the rpath.
+    pub set_rpath: bool,
 }
 
 impl Default for FlutterOptions<'_> {
@@ -54,9 +60,11 @@ impl Default for FlutterOptions<'_> {
             target_file: "lib/main.dart".as_path(),
             flutter_path: None,
             local_engine: None,
+            local_engine_host: None,
             local_engine_src_path: None,
             dart_defines: &[],
             macos_extra_pods: &[],
+            set_rpath: true,
         }
     }
 }
@@ -136,7 +144,7 @@ impl FlutterOptions<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum TargetOS {
     Mac,
     Windows,
@@ -214,6 +222,8 @@ impl Flutter<'_> {
             &flutter_out_root.join("pubspec.yaml"),
         )?;
 
+        self.set_flutter_root()?;
+        self.remove_rustc_from_env()?;
         self.precache()?;
         self.run_flutter_assemble(&flutter_out_root)?;
         self.emit_flutter_artifacts(&flutter_out_root)?;
@@ -221,6 +231,18 @@ impl Flutter<'_> {
 
         if Self::build_mode() == "profile" {
             cargo_emit::rustc_cfg!("flutter_profile");
+        }
+
+        if self.options.set_rpath {
+            if self.target_os == TargetOS::Mac {
+                cargo_emit::rustc_link_arg! {
+                    "-Wl,-rpath,@executable_path",
+                };
+            } else if self.target_os == TargetOS::Linux {
+                cargo_emit::rustc_link_arg! {
+                    "-Wl,-rpath,$ORIGIN/lib"
+                };
+            }
         }
 
         Ok(())
@@ -353,7 +375,7 @@ impl Flutter<'_> {
         match Flutter::target_os() {
             TargetOS::Mac => {
                 // FIXME: This needs better default
-                std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "10.14".into())
+                std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "10.15".into())
             }
             _ => {
                 panic!("Deployment target can only be called on Mac")
@@ -452,7 +474,10 @@ impl Flutter<'_> {
             // the only published action that builds desktop aot is *_bundle_*_assets; it also
             // produces other artifacts (i.e. flutter dll), but we ignore those and handle
             // artifacts on our own
-            (TargetOS::Windows, _) => vec![format!("{}_bundle_windows_assets", self.build_mode)],
+            (TargetOS::Windows, _) => vec![format!(
+                "{}_bundle_{}_assets",
+                self.build_mode, self.target_platform
+            )],
 
             // quicker, no need to copy flutter artifacts, we'll do it ourselves
             (TargetOS::Linux, "debug") => vec!["kernel_snapshot".into(), "copy_assets".into()],
@@ -479,6 +504,10 @@ impl Flutter<'_> {
 
         if let Some(local_engine) = &self.options.local_engine {
             command.arg(format!("--local-engine={local_engine}"));
+
+            if let Some(local_engine_host) = &self.options.local_engine_host {
+                command.arg(format!("--local-engine-host={}", local_engine_host));
+            }
 
             command.arg(format!(
                 "--local-engine-src-path={}",
@@ -512,7 +541,12 @@ impl Flutter<'_> {
     ) -> BuildResult<()> {
         let artifacts_dir = get_artifacts_dir()?;
         let flutter_out_root = self.out_dir.join("flutter");
-        let emitter = ArtifactsEmitter::new(self, flutter_out_root, artifacts_dir)?;
+        let emitter = ArtifactsEmitter::new(
+            self,
+            flutter_out_root,
+            artifacts_dir,
+            self.options.local_engine.is_some(),
+        )?;
 
         let plugins = Plugins::new(self, &emitter);
         plugins.process()?;
@@ -523,16 +557,19 @@ impl Flutter<'_> {
                     working_dir.as_ref().to_str().unwrap() => "framework",
                 };
                 emitter.emit_app_framework()?;
+                emitter.emit_native_assets(&self.target_os)?;
                 emitter.emit_external_libraries()?;
                 emitter.emit_linker_flags()?;
             }
             TargetOS::Windows => {
                 emitter.emit_flutter_data()?;
+                emitter.emit_native_assets(&self.target_os)?;
                 emitter.emit_external_libraries()?;
                 emitter.emit_linker_flags()?;
             }
             TargetOS::Linux => {
                 emitter.emit_flutter_data()?;
+                emitter.emit_native_assets(&self.target_os)?;
                 emitter.emit_external_libraries()?;
                 emitter.emit_linker_flags()?;
             }
@@ -588,6 +625,27 @@ impl Flutter<'_> {
             || to.as_ref().into(),
             || from.as_ref().into(),
         )
+    }
+
+    pub fn set_flutter_root(&self) -> BuildResult<()> {
+        if std::env::var("FLUTTER_ROOT").ok().is_some() {
+            return Ok(());
+        }
+        let flutter_bin = self.options.find_flutter_bin()?;
+        let root = flutter_bin.parent().unwrap();
+        // May be required when building plugins.
+        std::env::set_var("FLUTTER_ROOT", root);
+        Ok(())
+    }
+
+    pub fn remove_rustc_from_env(&self) -> BuildResult<()> {
+        let vars = std::env::vars();
+        for (key, _) in vars {
+            if key.starts_with("RUSTC") {
+                std::env::remove_var(&key);
+            }
+        }
+        Ok(())
     }
 
     pub fn precache(&self) -> BuildResult<()> {

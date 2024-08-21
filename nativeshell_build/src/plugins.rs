@@ -25,7 +25,8 @@ mod plugins_impl;
 
 #[derive(Debug)]
 pub(crate) struct PluginPlatformInfo {
-    pub plugin_class: String,
+    pub plugin_class: Option<String>,
+    pub platform_directory: PathBuf,
 }
 
 #[derive(Debug)]
@@ -34,7 +35,6 @@ pub(crate) struct Plugin {
     pub name: String,
     pub path: PathBuf,
     pub platform_path: PathBuf,
-    pub platform_name: String,
     pub platform_info: PluginPlatformInfo,
 }
 
@@ -95,7 +95,7 @@ impl<'a> Plugins<'a> {
         plugin_path: P,
     ) -> BuildResult<HashMap<String, PluginPlatformInfo>> {
         let mut res = HashMap::new();
-
+        println!("PP {:?}", plugin_path.as_ref());
         let path = plugin_path.as_ref().join("pubspec.yaml");
         let pub_spec = fs::read_to_string(&path).wrap_error(FileOperation::Read, || path)?;
         let pub_spec = YamlLoader::load_from_str(&pub_spec)
@@ -109,15 +109,35 @@ impl<'a> Plugins<'a> {
             for platform in platforms {
                 let plugin_class: Option<String> =
                     platform.1["pluginClass"].as_str().map(|s| s.into());
-                if let Some(plugin_class) = plugin_class {
+                let ffi_plugin = platform.1["ffiPlugin"].as_bool().unwrap_or(false);
+                if plugin_class.is_some() || ffi_plugin {
                     // This was a temporary hack in flutter, but some plugins are
                     // still using it
-                    if plugin_class != "none" {
-                        res.insert(
-                            platform.0.as_str().unwrap().into(),
-                            PluginPlatformInfo { plugin_class },
-                        );
+                    if plugin_class.as_deref() == Some("none") {
+                        continue;
                     }
+                    let platform_directory = {
+                        let yaml_platform = platform.0.as_str().unwrap();
+                        if yaml_platform == "ios" || yaml_platform == "macos" {
+                            let shared_darwin_source = platform.1["sharedDarwinSource"]
+                                .as_bool()
+                                .unwrap_or_default();
+                            if shared_darwin_source {
+                                "darwin".into()
+                            } else {
+                                yaml_platform.into()
+                            }
+                        } else {
+                            yaml_platform.into()
+                        }
+                    };
+                    res.insert(
+                        platform.0.as_str().unwrap().into(),
+                        PluginPlatformInfo {
+                            plugin_class,
+                            platform_directory,
+                        },
+                    );
                 }
             }
         }
@@ -142,7 +162,7 @@ impl<'a> Plugins<'a> {
             };
             if let Some(platform_info) = platform_info.remove(platform_name) {
                 let path: PathBuf = item.1.into();
-                let platform_path = path.join(platform_name);
+                let platform_path = path.join(&platform_info.platform_directory);
 
                 // some plugins are FFI only, no need to build them
                 if platform_path.exists() {
@@ -150,7 +170,6 @@ impl<'a> Plugins<'a> {
                         name: item.0,
                         path,
                         platform_path,
-                        platform_name: platform_name.into(),
                         platform_info,
                     });
                 }
